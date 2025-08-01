@@ -1,0 +1,184 @@
+# LSF Scheduler PPO Training - Hyperparameter Guide
+
+## Environment Parameters
+
+### Core Environment Settings
+- **`num_hosts`** (default: 10)
+  - Number of compute hosts in the cluster
+  - **Tuning**: More hosts = larger action space, may need lower LR
+  - **Impact**: Affects observation/action space size
+
+- **`episode_length`** (default: 500)
+  - Episode length in environment time units (≈20x timesteps)
+  - **Tuning**: Longer episodes = more rewards per episode, but slower rollouts
+  - **Impact**: Should be long enough for multiple job completion cycles
+
+- **`max_jobs_per_step`** (default: 30)
+  - Maximum jobs arriving per timestep
+  - **Tuning**: Higher = more scheduling pressure, harder learning
+  - **Impact**: Affects reward frequency and environment difficulty
+
+### Resource Constraints
+- **`host_cores_range`** (default: 32-32): Host CPU capacity
+- **`host_memory_range`** (default: 65536-65536): Host memory in MB
+- **`job_cores_range`** (default: 1-8): Job CPU requirements
+- **`job_memory_range`** (default: 4096-16384): Job memory requirements
+- **`job_duration_range`** (default: 10-90): Job duration in seconds
+
+## Training Parameters
+
+### Core PPO Settings
+- **`lr`** (default: 3e-4) 
+  - Learning rate - **CRITICAL PARAMETER**
+  - **Tuning**: 
+    - Too high (>1e-3): Unstable training, loss spikes
+    - Too low (<1e-4): Slow learning, plateau early
+    - For sparse rewards: Start higher (3e-4 to 5e-4)
+  - **Monitoring**: Watch policy loss, if oscillating → reduce LR
+
+- **`gamma`** (default: 0.995)
+  - Discount factor for future rewards
+  - **Tuning**: 
+    - Higher (0.99-0.999): Better for long-term planning
+    - Lower (0.9-0.98): Better for immediate rewards
+  - **For batch rewards**: Keep high (0.995) due to sparse signal
+
+- **`lam`** (default: 0.95)
+  - GAE lambda parameter for advantage estimation
+  - **Tuning**:
+    - Higher (0.95-0.99): More bias, less variance
+    - Lower (0.8-0.9): Less bias, more variance
+  - **For batch rewards**: 0.95 is good balance
+
+### Learning Rate Schedule
+- **`lr_schedule`** (default: "cosine")
+  - Options: constant, linear, exponential, cosine, warmup_cosine
+  - **Recommendation**: Use "cosine" for stable decay
+
+- **`lr_decay_factor`** (default: 0.995)
+  - For exponential decay only
+  - **Tuning**: Slower decay (0.998) for longer training
+
+- **`lr_warmup_steps`** (default: 1000)
+  - Gradual LR increase at start (for warmup schedules)
+  - **Tuning**: ~5-10% of total updates
+
+### PPO-Specific Parameters
+- **`clip_coef`** (default: 0.1)
+  - PPO clipping coefficient
+  - **Tuning**:
+    - Higher (0.2-0.3): More aggressive updates
+    - Lower (0.05-0.1): More conservative, stable
+  - **Monitor**: If policy updates too small → increase
+
+- **`ent_coef`** (default: 0.01)
+  - Entropy coefficient for exploration
+  - **Tuning**:
+    - Higher (0.01-0.05): More exploration
+    - Lower (0.001-0.005): More exploitation
+  - **For complex scheduling**: Start higher, decay over time
+
+- **`vf_coef`** (default: 0.5)
+  - Value function loss coefficient
+  - **Standard**: Usually 0.5, rarely needs tuning
+
+### Training Scale Parameters
+- **`total_timesteps`** (default: 33M)
+  - Total training steps
+  - **Formula**: rollout_steps × num_envs × num_updates
+  - **Tuning**: Monitor convergence, extend if still improving
+
+- **`rollout_steps`** (default: 2048)
+  - Steps per rollout collection
+  - **For batch rewards**: Must be long enough to capture multiple rewards
+  - **Tuning**: Should be 2-5x your typical reward interval
+
+- **`num_envs`** (default: 8)
+  - Parallel environments
+  - **Tuning**:
+    - More envs: Better sampling, more stable gradients
+    - Fewer envs: Less memory, faster iteration
+  - **Rule**: Increase if you have memory/CPU capacity
+
+- **`minibatch_size`** (default: 512)
+  - Batch size for SGD updates
+  - **Formula**: rollout_steps × num_envs / 4 to 8
+  - **Tuning**: Larger = more stable gradients, slower updates
+
+- **`update_epochs`** (default: 4)
+  - SGD epochs per rollout
+  - **Tuning**: More epochs = better gradient steps, risk overfitting
+
+### Advanced Parameters
+- **`early_stopping_patience`** (default: 200)
+  - Updates to wait for improvement
+  - **Tuning**: 10-20% of expected total updates
+
+- **`value_norm_decay`** (default: 0.99)
+  - Value normalization decay
+  - **Standard**: 0.99, rarely needs adjustment
+
+- **`exploration_noise_decay`** (default: 0.998)
+  - Policy exploration noise decay
+  - **Tuning**: Slower decay (0.999) for longer exploration
+
+## Tuning Strategy
+
+### 1. Start with Baseline
+Use the current defaults - they're optimized for your batch reward system.
+
+### 2. Monitor Key Metrics
+- **Training reward**: Should increase over time
+- **Policy loss**: Should decrease and stabilize
+- **Value loss**: Should decrease
+- **Entropy**: Should decrease gradually
+- **Test completion rate**: Should improve
+
+### 3. Common Issues & Fixes
+
+**Slow Learning:**
+- Increase `lr` to 5e-4
+- Increase `ent_coef` to 0.02
+- Check if `rollout_steps` captures enough rewards
+
+**Unstable Training:**
+- Decrease `lr` to 1e-4
+- Decrease `clip_coef` to 0.05
+- Increase `minibatch_size`
+
+**Poor Exploration:**
+- Increase `ent_coef`
+- Slower `exploration_noise_decay`
+- Check action space coverage
+
+**Plateauing Performance:**
+- Learning rate schedule with decay
+- Increase `total_timesteps`
+- Check if agent has converged to local optimum
+
+### 4. Advanced Tuning
+1. **Start conservative**: Use defaults
+2. **Single parameter**: Change one at a time
+3. **Monitor closely**: Watch TensorBoard logs
+4. **A/B test**: Compare different settings
+5. **Environment fit**: Adjust based on reward patterns
+
+## Environment-Specific Notes
+
+### Batch Reward System
+- Your rewards come when `current_time` advances (batch completion)
+- This creates sparse but meaningful signals
+- Requires longer rollouts to capture multiple reward events
+- Higher learning rates work well with clear reward signals
+
+### Time-Based Episodes
+- Episode length (500) ≈ 10,000 timesteps
+- Rewards occur every few hundred timesteps
+- PPO rollouts should span multiple reward events
+- Consider episode length vs rollout length ratio
+
+### Resource Scheduling Domain
+- Action space: Host priorities (continuous)
+- Complex state: Host utilization + job requirements
+- Delayed rewards: Jobs complete in future timesteps
+- Multi-objective: Balance utilization vs completion rate
