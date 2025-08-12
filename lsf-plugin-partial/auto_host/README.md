@@ -70,7 +70,5 @@ For more details on the ML service, refer to the `lsf-ml-service` README.
 
 ## Additional Notes
 
-- **Host Priorities:** The plugin uses metrics like throughput and job completion rates to determine host priorities. Default LSF host selection is based on `r15s`.
+- **Host Priorities:** The plugin uses metrics like throughput and job completion rates to determine host priorities.
 - **Reward Metrics:** Metrics such as makespan and fairness are considered for prioritization.
-
-For further details, consult the source code or related documentation.
