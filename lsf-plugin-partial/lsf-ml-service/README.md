@@ -2,6 +2,10 @@
 
 This folder contains the RESTful service and model for ML-based host selection in LSF environments.
 
+## Important Note
+
+The model provided in this folder may not be the most recent version. For the latest model and training scripts, please refer to the `training` folder in the root of this repository.
+
 ## How to Use
 
 1. **Start the RESTful Model Service**
