@@ -86,3 +86,6 @@ logs/
 
 # Ignore Git configuration files if not needed
 .gitattributes
+
+# Ignore JetBrains IDE project files
+.idea/
