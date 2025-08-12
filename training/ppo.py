@@ -17,8 +17,7 @@ class PPOBuffer:
         self.device = device
         self.ptr = 0
         self.full = False
-        
-        # Buffers
+
         self.obs = torch.zeros((size, obs_dim), dtype=torch.float32, device=device)
         self.actions = torch.zeros((size, action_dim), dtype=torch.float32, device=device)
         self.rewards = torch.zeros(size, dtype=torch.float32, device=device)
@@ -27,7 +26,7 @@ class PPOBuffer:
         self.dones = torch.zeros(size, dtype=torch.bool, device=device)
         self.advantages = torch.zeros(size, dtype=torch.float32, device=device)
         self.returns = torch.zeros(size, dtype=torch.float32, device=device)
-    
+
     def store(self, obs, action, reward, value, log_prob, done):
         self.obs[self.ptr] = torch.as_tensor(obs, dtype=torch.float32, device=self.device)
         self.actions[self.ptr] = torch.as_tensor(action, dtype=torch.float32, device=self.device)
@@ -35,52 +34,39 @@ class PPOBuffer:
         self.values[self.ptr] = torch.as_tensor(value, dtype=torch.float32, device=self.device)
         self.log_probs[self.ptr] = torch.as_tensor(log_prob, dtype=torch.float32, device=self.device)
         self.dones[self.ptr] = torch.as_tensor(done, dtype=torch.bool, device=self.device)
-        
+
         self.ptr = (self.ptr + 1) % self.size
         if self.ptr == 0:
             self.full = True
 
-    
     def compute_advantages(self, last_value: float, gamma: float = 0.99, lam: float = 0.95):
-        """Compute GAE advantages and returns"""
-        # Get actual buffer size
         buffer_size = self.size if self.full else self.ptr
-        
-        # Convert to numpy for easier computation
+
         rewards = self.rewards[:buffer_size].cpu().numpy()
         values = self.values[:buffer_size].cpu().numpy()
         dones = self.dones[:buffer_size].cpu().numpy()
-        
-        # Compute GAE
+
         advantages = np.zeros_like(rewards)
         last_gae = 0
-        
+
         for t in reversed(range(len(rewards))):
-            if t == len(rewards) - 1:
-                next_non_terminal = 1.0 - dones[t]
-                next_value = last_value
-            else:
-                next_non_terminal = 1.0 - dones[t]
-                next_value = values[t + 1]
-            
+            next_non_terminal = 1.0 - dones[t]
+            next_value = last_value if t == len(rewards) - 1 else values[t + 1]
+
             delta = rewards[t] + gamma * next_value * next_non_terminal - values[t]
             advantages[t] = last_gae = delta + gamma * lam * next_non_terminal * last_gae
-        
-        # Compute returns before normalizing advantages
+
         returns = advantages + values
-        
-        # Normalize advantages at rollout level
+
         adv_mean = advantages.mean()
         adv_std = advantages.std()
         advantages = (advantages - adv_mean) / (adv_std + 1e-8)
-        
-        # Store back in tensors
+
         self.advantages[:buffer_size] = torch.tensor(advantages, dtype=torch.float32, device=self.device)
         self.returns[:buffer_size] = torch.tensor(returns, dtype=torch.float32, device=self.device)
-    
+
     def get_batch(self):
         buffer_size = self.size if self.full else self.ptr
-        
         return {
             'obs': self.obs[:buffer_size],
             'actions': self.actions[:buffer_size],
@@ -89,7 +75,7 @@ class PPOBuffer:
             'returns': self.returns[:buffer_size],
             'values': self.values[:buffer_size]
         }
-    
+
     def clear(self):
         self.ptr = 0
         self.full = False
@@ -101,11 +87,8 @@ class MetricsReporter:
         self.test_interval = test_interval
         self.training_metrics = defaultdict(list)
         self.test_metrics = defaultdict(list)
-    
-    def log_training_metrics(self, update_count: int, rollout_metrics: Dict, update_metrics: Dict, 
-                           timesteps_collected: int, fps: float):
-        """Log training metrics to TensorBoard and store for analysis"""
-        # Calculate averages
+
+    def log_training_metrics(self, update_count: int, rollout_metrics: Dict, update_metrics: Dict, timesteps_collected: int, fps: float):
         avg_reward = np.mean(rollout_metrics['rewards'])
         avg_value = np.mean(rollout_metrics['values'])
         avg_entropy = np.mean(rollout_metrics['entropies'])
@@ -114,12 +97,9 @@ class MetricsReporter:
         avg_value_loss = np.mean(update_metrics['value_loss'])
         avg_entropy_loss = np.mean(update_metrics['entropy_loss'])
         avg_approx_kl = np.mean(update_metrics['approx_kl'])
-        
-        # Console output - concise training info
-        print(f"Update {update_count:4d} | Timesteps {timesteps_collected:7d} | "
-              f"FPS {fps:6.0f} | Reward {avg_reward:7.3f} | Loss {avg_total_loss:7.4f}")
-        
-        # TensorBoard logging - detailed metrics
+
+        print(f"Update {update_count:4d} | Timesteps {timesteps_collected:7d} | FPS {fps:6.0f} | Reward {avg_reward:7.3f} | Loss {avg_total_loss:7.4f}")
+
         self.writer.add_scalar('Training/Total_Loss', avg_total_loss, update_count)
         self.writer.add_scalar('Training/Policy_Loss', avg_policy_loss, update_count)
         self.writer.add_scalar('Training/Value_Loss', avg_value_loss, update_count)
@@ -129,8 +109,7 @@ class MetricsReporter:
         self.writer.add_scalar('Performance/Value', avg_value, update_count)
         self.writer.add_scalar('Performance/Entropy', avg_entropy, update_count)
         self.writer.add_scalar('Performance/FPS', fps, update_count)
-        
-        # Store for analysis
+
         self.training_metrics['update_count'].append(update_count)
         self.training_metrics['timesteps'].append(timesteps_collected)
         self.training_metrics['reward'].append(avg_reward)
@@ -138,48 +117,40 @@ class MetricsReporter:
         self.training_metrics['policy_loss'].append(avg_policy_loss)
         self.training_metrics['value_loss'].append(avg_value_loss)
         self.training_metrics['fps'].append(fps)
-    
+
     def log_environment_metrics(self, env, update_count: int, prefix: str = 'Environment'):
-        """Log environment-specific metrics"""
         if hasattr(env, 'get_metrics'):
             env_metrics = env.get_metrics()
             if isinstance(env_metrics, dict):
                 for key, value in env_metrics.items():
                     if isinstance(value, (int, float)):
                         self.writer.add_scalar(f'{prefix}/{key}', value, update_count)
-    
+
     def should_run_test(self, update_count: int) -> bool:
-        """Check if test episodes should be run"""
         return update_count % self.test_interval == 0
-    
+
     def log_test_results(self, test_rewards: List[float], env_metrics: Dict, update_count: int):
-        """Log test episode results"""
         avg_test_reward = np.mean(test_rewards)
         std_test_reward = np.std(test_rewards)
         min_test_reward = np.min(test_rewards)
         max_test_reward = np.max(test_rewards)
-        
-        # Console output
-        print(f"[TEST] Update {update_count:4d} | Avg: {avg_test_reward:.3f} ± {std_test_reward:.3f} | "
-              f"Range: [{min_test_reward:.3f}, {max_test_reward:.3f}]")
-        
-        # TensorBoard logging
+
+        print(f"[TEST] Update {update_count:4d} | Avg: {avg_test_reward:.3f} ± {std_test_reward:.3f} | Range: [{min_test_reward:.3f}, {max_test_reward:.3f}]")
+
         self.writer.add_scalar('Test/Avg_Reward', avg_test_reward, update_count)
         self.writer.add_scalar('Test/Std_Reward', std_test_reward, update_count)
         self.writer.add_scalar('Test/Min_Reward', min_test_reward, update_count)
         self.writer.add_scalar('Test/Max_Reward', max_test_reward, update_count)
-        
-        # Log environment metrics from test episodes
+
         for metric_name, values in env_metrics.items():
             if values:
                 avg_value = np.mean(values)
                 self.writer.add_scalar(f'Test/{metric_name}', avg_value, update_count)
-        
-        # Store for analysis
+
         self.test_metrics['update_count'].append(update_count)
         self.test_metrics['avg_reward'].append(avg_test_reward)
         self.test_metrics['std_reward'].append(std_test_reward)
-        
+
         return avg_test_reward
 
 
@@ -212,20 +183,15 @@ class PPOTrainer:
         episode_steps = []
         env_metrics_accum = defaultdict(list)
         
-        # Import the environment class to create fresh test environments
-        from wrapper.gym_wrapper import LsfEnvWrapper
         
         for ep in range(num_episodes):
-            # Create fresh environment with deterministic seed for this episode
             seed = test_seeds[ep % len(test_seeds)]
             
-            # Get environment config from training environment
             if self.is_vectorized:
                 train_env = self.env.envs[0]
             else:
                 train_env = self.env
                 
-            # Create fresh test environment with specific seed using wrapper method
             test_env = train_env.create_test_env(seed)
             
             obs, _ = test_env.reset()
@@ -245,11 +211,9 @@ class PPOTrainer:
                 ep_reward += reward
                 ep_steps += 1
                 
-            # Use total episode reward instead of average per step
             rewards.append(ep_reward)
             episode_steps.append(ep_steps)
             
-            # Collect environment metrics if available
             if hasattr(test_env, 'get_metrics'):
                 metrics = test_env.get_metrics()
                 if isinstance(metrics, dict):
@@ -257,10 +221,8 @@ class PPOTrainer:
                         if isinstance(v, (int, float)):
                             env_metrics_accum[k].append(v)
         
-        # Use metrics reporter for consistent logging
         avg_test_reward = self.metrics_reporter.log_test_results(rewards, env_metrics_accum, update_count)
-        
-        # Add timestep information to the test output
+
         if episode_steps:
             avg_steps = np.mean(episode_steps)
             total_steps = sum(episode_steps)
@@ -400,9 +362,7 @@ class PPOTrainer:
                 else:
                     print(f"  {metric}: PPO {ppo_val:.3f} vs Baseline {baseline_val:.3f}")
                 
-                # Log to TensorBoard - same plot for comparison
                 if self.writer:
-                    # Use same metric name with different tags for overlay plotting
                     self.writer.add_scalars(f'Metrics/{metric}', {
                         'PPO': ppo_val,
                         'Baseline': baseline_val
@@ -461,7 +421,6 @@ class PPOTrainer:
         
         self.policy.to(self.device)
         
-        # Store new parameters
         self.lr = lr
         self.lr_schedule = lr_schedule
         self.lr_decay_factor = lr_decay_factor
@@ -472,7 +431,6 @@ class PPOTrainer:
         self.checkpoint_dir = checkpoint_dir
         self.save_freq = save_freq
         
-        # Optimizer and learning rate scheduling
         self.optimizer = optim.Adam(self.policy.parameters(), lr=lr)
         self.scheduler = self._create_lr_scheduler()
         
@@ -481,7 +439,6 @@ class PPOTrainer:
         self.patience_counter = 0
         self.should_stop = False
         
-        # Value normalization
         self.value_mean = 0.0
         self.value_var = 1.0
         
@@ -506,16 +463,9 @@ class PPOTrainer:
             action_dim = env.action_space.shape[0]
             self.buffer = PPOBuffer(buffer_size, obs_dim, action_dim, self.device)
         
-        # Metrics
         self.metrics = defaultdict(list)
-        
-        # TensorBoard setup
         self.writer = SummaryWriter(tensorboard_log_dir)
-        
-        # Metrics reporting system
         self.metrics_reporter = MetricsReporter(self.writer, test_interval=10)
-        
-        # Advanced metrics tracking
         self.grad_norms = []
         self.lr_history = []
     
@@ -568,7 +518,6 @@ class PPOTrainer:
             obs = next_obs
             
             if done:
-                # Collect environment metrics on episode completion
                 if hasattr(self.env, 'get_metrics'):
                     env_metrics = self.env.get_metrics()
                     for key, val in env_metrics.items():
@@ -606,7 +555,7 @@ class PPOTrainer:
             obs_batch = torch.tensor(obs, dtype=torch.float32, device=self.device)
             
             with torch.no_grad():
-                # Batch process all environments at once - your policy supports batching!
+                # Batch process all environments at once
                 batch_actions, batch_log_probs, batch_entropies, batch_values = self.policy.get_action_and_value(obs_batch)
                 
                 # Convert to lists for env.step() and storage
@@ -617,8 +566,6 @@ class PPOTrainer:
             
             # Step all environments together
             next_obs, rewards, terminated, truncated, infos = self.env.step(actions)
-    
-            # Store experiences for each environment in separate buffers
             for env_idx in range(self.num_envs):
                 env_obs = obs[env_idx]
                 env_action = actions[env_idx]
@@ -629,7 +576,6 @@ class PPOTrainer:
                 self.buffers[env_idx].store(env_obs, env_action, env_reward, values[env_idx], 
                                           log_probs[env_idx], bool(env_done))
                 
-                # Metrics
                 rollout_metrics['rewards'].append(env_reward)
                 rollout_metrics['values'].append(values[env_idx])
                 rollout_metrics['entropies'].append(entropies[env_idx])
@@ -653,8 +599,7 @@ class PPOTrainer:
         if self.lr_schedule == "constant":
             return None
         elif self.lr_schedule == "linear":
-            # Adjust for actual training length - use total_timesteps/rollout_steps as approximation
-            estimated_updates = 1000  # Will be overridden in train() method
+            estimated_updates = 1000
             return LinearLR(self.optimizer, start_factor=1.0, end_factor=0.1, total_iters=estimated_updates)
         elif self.lr_schedule == "exponential":
             return ExponentialLR(self.optimizer, gamma=self.lr_decay_factor)
@@ -893,12 +838,10 @@ class PPOTrainer:
                 elapsed_time = time.time() - start_time
                 fps = timesteps_collected / elapsed_time
                 
-                # Log training metrics using organized reporter
                 self.metrics_reporter.log_training_metrics(
                     update_count, rollout_metrics, update_metrics, timesteps_collected, fps
                 )
-                
-                # Log advanced metrics
+
                 if self.grad_norms:
                     avg_grad_norm = np.mean(self.grad_norms[-10:])  # Last 10 updates
                     self.writer.add_scalar('Training/Grad_Norm', avg_grad_norm, update_count)
@@ -912,10 +855,6 @@ class PPOTrainer:
                 self.writer.add_scalar('Training/Value_Mean', self.value_mean, update_count)
                 self.writer.add_scalar('Training/Value_Var', self.value_var, update_count)
                 
-                # # Log environment metrics during training
-                # self.metrics_reporter.log_environment_metrics(self.env, update_count, 'Training_Environment')
-                
-                # Store metrics for backward compatibility
                 avg_reward = np.mean(rollout_metrics['rewards'])
                 avg_value = np.mean(rollout_metrics['values'])
                 avg_total_loss = np.mean(update_metrics['total_loss'])

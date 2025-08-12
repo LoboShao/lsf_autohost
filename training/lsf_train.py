@@ -7,7 +7,6 @@ import torch
 import argparse
 import numpy as np
 from wrapper.gym_wrapper import make_lsf_env
-from training.models import ActorCriticPolicy
 from training.mlp_model import MLPPolicy
 from training.variable_host_model import VariableHostPolicy
 from training.ppo import PPOTrainer
@@ -103,17 +102,14 @@ def create_model(obs_dim, action_dim, num_hosts, exploration_noise_decay=0.995, 
 def main():
     args = parse_args()
     
-    # Set random seed
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
     
-    # Create unique TensorBoard log directory if not specified
     if args.tensorboard_dir is None:
         from datetime import datetime
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         args.tensorboard_dir = f"logs/ppo_training_{timestamp}"
     
-    # Set checkpoint directory to match tensorboard directory if not specified
     if args.checkpoint_dir is None:
         args.checkpoint_dir = args.tensorboard_dir.replace("logs/", "checkpoints/")
     
@@ -223,7 +219,6 @@ def main():
             torch.save(policy.state_dict(), args.save_model)
             print(f"Model saved to {args.save_model}")
         
-        # Print final metrics
         if 'training_metrics' in metrics and 'reward' in metrics['training_metrics']:
             if metrics['training_metrics']['reward']:
                 final_reward = metrics['training_metrics']['reward'][-1]
@@ -232,12 +227,10 @@ def main():
             final_reward = metrics['rewards'][-1]
             print(f"Final average reward: {final_reward:.3f}")
         
-        # Print environment metrics
         try:
             env_metrics = env.get_metrics()
             print(f"\nFinal environment metrics:")
             
-            # Only print metrics that exist
             metric_names = {
                 'total_jobs_completed': 'Total jobs completed',
                 'completion_rate': 'Completion rate', 
