@@ -80,3 +80,9 @@ venv.bak/
 checkpoints/
 logs/
 *.log
+
+# Ignore macOS-specific metadata files
+.DS_Store
+
+# Ignore Git configuration files if not needed
+.gitattributes
