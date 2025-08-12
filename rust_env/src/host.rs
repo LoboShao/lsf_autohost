@@ -10,9 +10,10 @@ pub struct Host {
     pub available_memory: u32,
     pub running_job_ids: HashMap<u32, Job>,
     
-    // Core utilization history for 15-second average calculation (store up to 60 seconds)
-    core_history: VecDeque<f32>, // Store 60 past core utilization values
-    last_core_update_time: f32,
+    // Utilization history for per-second tracking (store up to 60 seconds)
+    core_history: VecDeque<f32>, // Store past per-second core utilization values
+    memory_history: VecDeque<f32>, // Store past per-second memory utilization values
+    last_history_update_time: f32,
 }
 
 impl Host {
@@ -25,7 +26,8 @@ impl Host {
             available_memory: total_memory,
             running_job_ids: HashMap::new(),
             core_history: VecDeque::new(),
-            last_core_update_time: 0.0,
+            memory_history: VecDeque::new(),
+            last_history_update_time: 0.0,
         }
     }
     
@@ -53,6 +55,16 @@ impl Host {
     }
     
     pub fn get_core_utilization(&self) -> f32 {
+        // Return per-second average, fallback to current if no history
+        if self.core_history.is_empty() {
+            self.get_current_core_utilization()
+        } else {
+            // Return the most recent per-second value
+            *self.core_history.back().unwrap_or(&0.0)
+        }
+    }
+    
+    pub fn get_current_core_utilization(&self) -> f32 {
         if self.total_cores == 0 {
             0.0
         } else {
@@ -61,6 +73,16 @@ impl Host {
     }
     
     pub fn get_memory_utilization(&self) -> f32 {
+        // Return per-second average, fallback to current if no history
+        if self.memory_history.is_empty() {
+            self.get_current_memory_utilization()
+        } else {
+            // Return the most recent per-second value
+            *self.memory_history.back().unwrap_or(&0.0)
+        }
+    }
+    
+    pub fn get_current_memory_utilization(&self) -> f32 {
         if self.total_memory == 0 {
             0.0
         } else {
@@ -68,28 +90,33 @@ impl Host {
         }
     }
     
-    pub fn update_core_history(&mut self, current_time: f32) {
-        let current_util = self.get_core_utilization();
-        
-        // Add current utilization to history
-        self.core_history.push_back(current_util);
-        
-        // Keep only last 60 values (60 seconds of history)
-        while self.core_history.len() > 60 {
-            self.core_history.pop_front();
+    pub fn update_utilization_history(&mut self, current_time: f32) {
+        // Only update once per second
+        let current_time_floor = current_time.floor();
+        if current_time_floor > self.last_history_update_time {
+            // Get current utilization values (real-time)
+            let current_core_util = self.get_current_core_utilization();
+            let current_memory_util = self.get_current_memory_utilization();
+            
+            // Add current utilization to history
+            self.core_history.push_back(current_core_util);
+            self.memory_history.push_back(current_memory_util);
+            
+            // Keep only last 60 values (60 seconds of history)
+            while self.core_history.len() > 60 {
+                self.core_history.pop_front();
+            }
+            while self.memory_history.len() > 60 {
+                self.memory_history.pop_front();
+            }
+            
+            self.last_history_update_time = current_time_floor;
         }
-        
-        self.last_core_update_time = current_time;
     }
     
-    pub fn get_core_utilization_15s_avg(&self) -> f32 {
-        if self.core_history.is_empty() {
-            return self.get_core_utilization();
-        }
-        
-        // Take last 15 values for 15-second average
-        let recent_count = self.core_history.len().min(15);
-        let total_util: f32 = self.core_history.iter().rev().take(recent_count).sum();
-        total_util / recent_count as f32
+    // Keep the old method name for backward compatibility, but make it call the new one
+    pub fn update_core_history(&mut self, current_time: f32) {
+        self.update_utilization_history(current_time);
     }
+    
 }

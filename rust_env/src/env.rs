@@ -26,9 +26,8 @@ pub struct ClusterSchedulerEnv {
     
     // State
     hosts: Vec<Host>,
-    host_core_utils: Vec<f32>,           // Real-time core utilization (for performance checking only)
-    host_core_utils_15s: Vec<f32>,       // 15-second average core utilization (LSF accessible)
-    host_memory_utils: Vec<f32>,         // Real-time memory utilization (LSF accessible)
+    host_core_utils: Vec<f32>,           // Host core utilization in last second (LSF accessible)
+    host_memory_utils: Vec<f32>,         // Host memory utilization in last second (LSF accessible)
     
     // Time-based utilization statistics (updated every second)
     core_util_sum: f64,                 // Sum of core utilization values
@@ -134,7 +133,6 @@ impl ClusterSchedulerEnv {
         }
         
         let host_core_utils = vec![0.0; num_hosts];
-        let host_core_utils_15s = vec![0.0; num_hosts];
         let host_memory_utils = vec![0.0; num_hosts];
         
         ClusterSchedulerEnv {
@@ -149,7 +147,6 @@ impl ClusterSchedulerEnv {
             episode_length,
             hosts,
             host_core_utils,
-            host_core_utils_15s,
             host_memory_utils,
             core_util_sum: 0.0,
             memory_util_sum: 0.0,
@@ -218,7 +215,6 @@ impl ClusterSchedulerEnv {
         
         // Reset utilization arrays
         self.host_core_utils.fill(0.0);
-        self.host_core_utils_15s.fill(0.0);
         self.host_memory_utils.fill(0.0);
         
         // Reset time-based statistics
@@ -327,7 +323,7 @@ impl ClusterSchedulerEnv {
     
     fn get_state(&mut self, py: Python) -> PyResult<Py<PyArray1<f32>>> {
 
-        // Calculate state size: 15s core utils + memory utils + single job
+        // Calculate state size: core utils + memory utils + single job
         let state_size = self.num_hosts * 2 + 2;
         
         // Resize cached vector if needed
@@ -338,11 +334,11 @@ impl ClusterSchedulerEnv {
         // Clear the cached state
         self.cached_state.fill(0.0);
         
-        // Fill state in format: [host1_cores15s, host1_mem, ..., hostN_cores15s, hostN_mem]
+        // Fill state in format: [host1_cores, host1_mem, ..., hostN_cores, hostN_mem]
         for i in 0..self.num_hosts {
             let base_idx = i * 2;
-            self.cached_state[base_idx] = self.host_core_utils_15s[i];     // 15-second core average (LSF accessible)
-            self.cached_state[base_idx + 1] = self.host_memory_utils[i];    // Available memory (LSF accessible)
+            self.cached_state[base_idx] = self.host_core_utils[i];     // Host core utilization in last second (LSF accessible)
+            self.cached_state[base_idx + 1] = self.host_memory_utils[i];    // Host memory utilization in last second (LSF accessible)
         }
         
         // Single job info (only 1 job observable) - at end of state vector
@@ -371,7 +367,6 @@ impl ClusterSchedulerEnv {
     }
     
     pub fn get_metrics(&self, py: Python) -> PyResult<PyObject> {
-        let total_jobs_in_system = self.jobs_moved_to_queue.max(1) as f64;
         
         let avg_core_util = if self.utilization_sample_count > 0 {
             (self.core_util_sum / self.utilization_sample_count as f64) as f32
@@ -545,17 +540,13 @@ impl ClusterSchedulerEnv {
     
     fn update_host_utilization(&mut self) {
         for (i, host) in self.hosts.iter_mut().enumerate() {
-            // Update core history first with current time
-            host.update_core_history(self.current_time.floor() as f32);
+            // Update utilization history (only updates once per second)
+            host.update_utilization_history(self.current_time.floor() as f32);
             
-            // Core utilization: real-time (LSF can see this instantly)
+            // Core utilization: per-second value (LSF accessible)
             self.host_core_utils[i] = host.get_core_utilization();
             
-            // Core utilization: 15-second average (LSF records recent core usage)
-            self.host_core_utils_15s[i] = host.get_core_utilization_15s_avg();
-            
-            
-            // Memory utilization: exact (LSF can see this instantly)
+            // Memory utilization: per-second value (LSF accessible) 
             self.host_memory_utils[i] = host.get_memory_utilization();
         }
         
@@ -654,38 +645,6 @@ impl ClusterSchedulerEnv {
         0 // No job scheduled
     }
 
-    // Baseline scheduler: first available host
-    fn schedule_single_job_baseline_first_available(&mut self, job: Job) -> usize {
-        // Try hosts in order (0, 1, 2, ...)
-        for host in &mut self.hosts {
-            if host.can_accommodate(&job) {
-                // Clone only when we can actually schedule the job
-                let mut job_to_schedule = job.clone();
-                
-                // Successfully schedule
-                if host.allocate_job(&mut job_to_schedule) {
-                    job_to_schedule.start_time = Some(self.current_time);
-                    
-                    // Schedule completion
-                    let completion_time = self.current_time.floor() + job_to_schedule.duration as f64;
-                    let job_id = job_to_schedule.id;
-                    self.completion_heap.push(CompletionEvent {
-                        completion_time,
-                        job_id,
-                    });
-                    
-                    self.active_jobs.insert(job_id, job_to_schedule);
-                    return 1; // Successfully scheduled one job
-                }
-            }
-        }
-        
-        // Put unscheduled job to deferred queue - will be retried after time advances
-        self.deferred_jobs.push_back(job);
-        
-        0 // No job scheduled
-    }
-    
     
     fn should_advance_time_after_current_job(&mut self) -> bool {
         // Advance time when we've processed all jobs that need immediate decisions
