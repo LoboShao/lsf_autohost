@@ -63,6 +63,7 @@ pub struct ClusterSchedulerEnv {
     total_jobs_generated: u32,
     total_jobs_completed: u32,
     total_jobs_failed: u32,
+    jobs_completed_this_step: u32,
     
     // Batch-wise reward tracking
     last_reward_time: f64,  // Last time we gave a batch reward
@@ -175,6 +176,7 @@ impl ClusterSchedulerEnv {
             total_jobs_generated: 0,
             total_jobs_completed: 0,
             total_jobs_failed: 0,
+            jobs_completed_this_step: 0,
             last_reward_time: -1.0,
             rng,
             original_seed,
@@ -206,6 +208,7 @@ impl ClusterSchedulerEnv {
         self.total_jobs_generated = 0;
         self.total_jobs_completed = 0;
         self.total_jobs_failed = 0;
+        self.jobs_completed_this_step = 0;
         
         // Reset batch tracking
         self.last_reward_time = -1.0;
@@ -281,6 +284,9 @@ impl ClusterSchedulerEnv {
         } else {
             0
         };
+        
+        // Reset completion counter for this step
+        self.jobs_completed_this_step = 0;
         
         // Update host utilization BEFORE processing completions to capture actual resource usage
         self.update_host_utilization();
@@ -399,7 +405,8 @@ impl ClusterSchedulerEnv {
         
         // Job completion metrics
         metrics.set_item("total_jobs_completed", self.total_jobs_completed)?;
-        metrics.set_item("completion_rate", self.total_jobs_completed as f64 / total_jobs_in_system)?;
+        metrics.set_item("completion_rate", self.total_jobs_completed as f64 / self.total_jobs_generated.max(1) as f64)?;
+        metrics.set_item("jobs_in_progress", self.active_jobs.len())?;
         
         // Time-based utilization metrics (averaged over seconds, not timesteps)
         metrics.set_item("avg_host_core_utilization", avg_core_util)?;
@@ -529,6 +536,7 @@ impl ClusterSchedulerEnv {
                 }
                 
                 self.total_jobs_completed += 1;
+                self.jobs_completed_this_step += 1;
                 
                 completed_jobs.push(job);
             }
@@ -645,6 +653,38 @@ impl ClusterSchedulerEnv {
         
         0 // No job scheduled
     }
+
+    // Baseline scheduler: first available host
+    fn schedule_single_job_baseline_first_available(&mut self, job: Job) -> usize {
+        // Try hosts in order (0, 1, 2, ...)
+        for host in &mut self.hosts {
+            if host.can_accommodate(&job) {
+                // Clone only when we can actually schedule the job
+                let mut job_to_schedule = job.clone();
+                
+                // Successfully schedule
+                if host.allocate_job(&mut job_to_schedule) {
+                    job_to_schedule.start_time = Some(self.current_time);
+                    
+                    // Schedule completion
+                    let completion_time = self.current_time.floor() + job_to_schedule.duration as f64;
+                    let job_id = job_to_schedule.id;
+                    self.completion_heap.push(CompletionEvent {
+                        completion_time,
+                        job_id,
+                    });
+                    
+                    self.active_jobs.insert(job_id, job_to_schedule);
+                    return 1; // Successfully scheduled one job
+                }
+            }
+        }
+        
+        // Put unscheduled job to deferred queue - will be retried after time advances
+        self.deferred_jobs.push_back(job);
+        
+        0 // No job scheduled
+    }
     
     
     fn should_advance_time_after_current_job(&mut self) -> bool {
@@ -677,6 +717,7 @@ impl ClusterSchedulerEnv {
     
 
     fn calculate_resource_balance_reward(&mut self, scheduled_jobs: usize) -> f64 {
+        // Resource efficiency component (0.7 weight)
         let mut total_effective_util = 0.0;
         
         for i in 0..self.num_hosts {
@@ -687,10 +728,13 @@ impl ClusterSchedulerEnv {
         }
         
         let avg_effective_util = total_effective_util / self.num_hosts as f64;
+        let resource_reward = avg_effective_util * 0.7;
 
-        let scheduling_bonus = if scheduled_jobs > 0 { 0.01 } else { 0.0 };
+        // Throughput component (0.3 weight) - normalized by host capacity to prevent domination
+        let completion_rate = self.jobs_completed_this_step as f64 / self.num_hosts as f64;
+        let throughput_reward = completion_rate.min(1.0) * 0.3; // Cap at 0.3 to prevent reward explosion
         
-        avg_effective_util + scheduling_bonus
+        resource_reward + throughput_reward
     }
 
 }

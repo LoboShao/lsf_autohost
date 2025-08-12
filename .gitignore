@@ -77,5 +77,6 @@ env.bak/
 venv.bak/
 
 # Logs
+checkpoints/
 logs/
 *.log

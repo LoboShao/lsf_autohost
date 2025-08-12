@@ -183,6 +183,17 @@ class MetricsReporter:
         return avg_test_reward
 
 
+class FirstAvailableBaseline:
+    """Baseline that always selects first available host (highest priority to host 0)"""
+    def __init__(self, num_hosts):
+        self.num_hosts = num_hosts
+    
+    def get_action_and_value(self, obs, deterministic=True):
+        # Return decreasing priorities: host 0 gets highest priority (1.0), host 1 gets 0.9, etc.
+        action = torch.linspace(1.0, 0.0, self.num_hosts)
+        return action, None, None, None
+
+
 class PPOTrainer:
     def test(self, num_episodes: int = 5, update_count: int = 0, 
              test_seeds: List[int] = None) -> float:
@@ -267,6 +278,143 @@ class PPOTrainer:
             
         self.policy.train()
         return avg_test_reward
+
+    def test_with_metrics(self, num_episodes: int = 5, update_count: int = 0, 
+                         test_seeds: List[int] = None, policy_name: str = "PPO") -> Dict:
+        """Test policy and collect environment metrics"""
+        if test_seeds is None:
+            test_seeds = [42, 43, 44, 45, 46]
+            
+        self.policy.eval()
+        episode_metrics = []
+        
+        if self.is_vectorized:
+            train_env = self.env.envs[0]
+        else:
+            train_env = self.env
+        
+        for ep in range(num_episodes):
+            seed = test_seeds[ep % len(test_seeds)]
+            test_env = train_env.create_test_env(seed)
+            
+            obs, _ = test_env.reset()
+            terminated = False
+            truncated = False
+            
+            while not (terminated or truncated):
+                obs_tensor = torch.tensor(obs, dtype=torch.float32, device=self.device)
+                with torch.no_grad():
+                    action, _, _, _ = self.policy.get_action_and_value(obs_tensor, deterministic=True)
+                obs, reward, terminated, truncated, _ = test_env.step(action.cpu().numpy())
+                
+            # Collect environment metrics
+            if hasattr(test_env, 'get_metrics'):
+                metrics = test_env.get_metrics()
+                if isinstance(metrics, dict):
+                    episode_metrics.append(metrics)
+            
+            test_env.close()
+        
+        # Average metrics across episodes
+        if episode_metrics:
+            avg_metrics = {}
+            for key in episode_metrics[0].keys():
+                values = [m.get(key, 0) for m in episode_metrics if key in m]
+                if values:
+                    avg_metrics[key] = np.mean(values)
+        else:
+            avg_metrics = {}
+        
+        self.policy.train()
+        return avg_metrics
+
+    def test_baseline_with_metrics(self, num_episodes: int = 5, update_count: int = 0, 
+                                  test_seeds: List[int] = None) -> Dict:
+        """Test baseline policy and collect environment metrics"""
+        if test_seeds is None:
+            test_seeds = [42, 43, 44, 45, 46]
+            
+        if self.is_vectorized:
+            train_env = self.env.envs[0]
+        else:
+            train_env = self.env
+        
+        num_hosts = train_env.num_hosts
+        baseline = FirstAvailableBaseline(num_hosts)
+        episode_metrics = []
+        
+        for ep in range(num_episodes):
+            seed = test_seeds[ep % len(test_seeds)]
+            test_env = train_env.create_test_env(seed)
+            
+            obs, _ = test_env.reset()
+            terminated = False
+            truncated = False
+            
+            while not (terminated or truncated):
+                obs_tensor = torch.tensor(obs, dtype=torch.float32, device=self.device)
+                action, _, _, _ = baseline.get_action_and_value(obs_tensor)
+                obs, reward, terminated, truncated, _ = test_env.step(action.cpu().numpy())
+                
+            # Collect environment metrics
+            if hasattr(test_env, 'get_metrics'):
+                metrics = test_env.get_metrics()
+                if isinstance(metrics, dict):
+                    episode_metrics.append(metrics)
+            
+            test_env.close()
+        
+        # Average metrics across episodes
+        if episode_metrics:
+            avg_metrics = {}
+            for key in episode_metrics[0].keys():
+                values = [m.get(key, 0) for m in episode_metrics if key in m]
+                if values:
+                    avg_metrics[key] = np.mean(values)
+        else:
+            avg_metrics = {}
+        
+        return avg_metrics
+
+    def log_metric_comparison(self, ppo_metrics: Dict, baseline_metrics: Dict, update_count: int):
+        """Log comparison between PPO and baseline performance metrics"""
+        print(f"\n=== Performance Comparison (Update {update_count}) ===")
+        
+        # Define key metrics to compare
+        key_metrics = [
+            'total_jobs_completed',
+            'completion_rate', 
+            'avg_host_core_utilization',
+            'avg_host_memory_utilization',
+            'jobs_in_progress'
+        ]
+        
+        for metric in key_metrics:
+            if metric in ppo_metrics and metric in baseline_metrics:
+                ppo_val = ppo_metrics[metric]
+                baseline_val = baseline_metrics[metric]
+                
+                if baseline_val != 0:
+                    improvement = ((ppo_val - baseline_val) / abs(baseline_val)) * 100
+                    print(f"  {metric}: PPO {ppo_val:.3f} vs Baseline {baseline_val:.3f} ({improvement:+.1f}%)")
+                else:
+                    print(f"  {metric}: PPO {ppo_val:.3f} vs Baseline {baseline_val:.3f}")
+                
+                # Log to TensorBoard - same plot for comparison
+                if self.writer:
+                    # Use same metric name with different tags for overlay plotting
+                    self.writer.add_scalars(f'Metrics/{metric}', {
+                        'PPO': ppo_val,
+                        'Baseline': baseline_val
+                    }, update_count)
+                    
+                    # Also log improvement percentage separately
+                    if baseline_val != 0:
+                        improvement = ((ppo_val - baseline_val) / abs(baseline_val)) * 100
+                        self.writer.add_scalar(f'Improvement/{metric}_percent', improvement, update_count)
+        
+        print()
+
     def __init__(
         self,
         policy,
@@ -787,7 +935,11 @@ class PPOTrainer:
             
             # Run test episodes at specified intervals
             if self.metrics_reporter.should_run_test(update_count):
-                self.test(num_episodes=5, update_count=update_count)
+                ppo_metrics = self.test_with_metrics(num_episodes=5, update_count=update_count, policy_name="PPO")
+                baseline_metrics = self.test_baseline_with_metrics(num_episodes=5, update_count=update_count)
+                
+                # Compare performance metrics
+                self.log_metric_comparison(ppo_metrics, baseline_metrics, update_count)
 
         training_time = time.time() - start_time
         print(f"Training completed in {training_time:.2f} seconds")

@@ -9,6 +9,7 @@ import numpy as np
 from wrapper.gym_wrapper import make_lsf_env
 from training.models import ActorCriticPolicy
 from training.mlp_model import MLPPolicy
+from training.variable_host_model import VariableHostPolicy
 from training.ppo import PPOTrainer
 
 
@@ -16,9 +17,9 @@ def parse_args():
     parser = argparse.ArgumentParser(description='Train PPO agent on LSF scheduling environment with arrival-time batching')
     
     # Environment args - OPTIMIZED FOR JOB CYCLES  
-    parser.add_argument('--num-hosts', type=int, default=30, help='Number of hosts in the cluster')
+    parser.add_argument('--num-hosts', type=int, default=50, help='Number of hosts in the cluster')
     parser.add_argument('--episode-length', type=int, default=300, help='Episode length in steps (matches rollout steps)')
-    parser.add_argument('--max-jobs-per-step', type=int, default=20, help='Maximum jobs per step - much higher load for resource pressure')
+    parser.add_argument('--max-jobs-per-step', type=int, default=30, help='Maximum jobs per step - much higher load for resource pressure')
     parser.add_argument('--max-queue-length', type=int, default=100*100, help='Maximum queue length')
     
     # Host/Job resource ranges - INCREASED LOAD FOR SCHEDULING PRESSURE
@@ -27,7 +28,7 @@ def parse_args():
     parser.add_argument('--host-memory-min', type=int, default=64*1024, help='Minimum host memory (MB)')
     parser.add_argument('--host-memory-max', type=int, default=128*1024, help='Maximum host memory (MB)')
     parser.add_argument('--job-cores-min', type=int, default=1, help='Minimum job cores - bigger minimum jobs')
-    parser.add_argument('--job-cores-max', type=int, default=2, help='Maximum job cores - larger synthesis/PnR jobs')
+    parser.add_argument('--job-cores-max', type=int, default=4, help='Maximum job cores - larger synthesis/PnR jobs')
     parser.add_argument('--job-memory-min', type=int, default=1*512, help='Minimum job memory (MB) - 4GB realistic minimum')
     parser.add_argument('--job-memory-max', type=int, default=4*1024, help='Maximum job memory (MB) - 16GB for larger jobs')
     parser.add_argument('--job-duration-min', type=int, default=10, help='Minimum job duration (seconds) - shorter for more turnover')
@@ -35,8 +36,8 @@ def parse_args():
     
     # Training args - OPTIMIZED FOR BATCH REWARDS & JOB CYCLES
     # Formula: total_timesteps = rollout_steps × num_envs × num_updates
-    # Default: 4096 × 4 × 2048 = 33,554,432 timesteps (~2048 updates)
-    parser.add_argument('--total-timesteps', type=int, default=4096*5*4096, help='Total training timesteps: rollout_steps × num_envs × 2048_updates')
+    # Default: 4096 × 3 × 4096 = 33,554,432 timesteps (~2048 updates)
+    parser.add_argument('--total-timesteps', type=int, default=4096*3*4096, help='Total training timesteps: rollout_steps × num_envs × 2048_updates')
     parser.add_argument('--rollout-steps', type=int, default=4096, help='Steps per rollout - capture multiple job cycles')
     parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate optimized for batch rewards')
     parser.add_argument('--gamma', type=float, default=0.995, help='Discount factor')
@@ -64,11 +65,12 @@ def parse_args():
     parser.add_argument('--early-stopping-threshold', type=float, default=0.01, help='Early stopping improvement threshold')
     parser.add_argument('--value-norm-decay', type=float, default=0.99, help='Value normalization decay factor')
     parser.add_argument('--checkpoint-dir', type=str, default=None, help='Directory to save checkpoints')
-    parser.add_argument('--save-freq', type=int, default=25, help='Checkpoint save frequency - more frequent for experiments')
+    parser.add_argument('--save-freq', type=int, default=50, help='Checkpoint save frequency - more frequent for experiments')
     parser.add_argument('--resume-from', type=str, default=None, help='Resume training from checkpoint')
     parser.add_argument('--exploration-noise-decay', type=float, default=0.998, help='Exploration noise decay factor - slower decay')
     parser.add_argument('--min-exploration-noise', type=float, default=0.01, help='Minimum exploration noise')
-    parser.add_argument('--num-envs', type=int, default=5, help='Number of parallel environments - more for better sampling')
+    parser.add_argument('--num-envs', type=int, default=3, help='Number of parallel environments - more for better sampling')
+    parser.add_argument('--tensorboard-dir', type=str, default=None, help='TensorBoard log directory (auto-generated if not specified)')
     
     return parser.parse_args()
 
@@ -82,7 +84,14 @@ def create_model(obs_dim, action_dim, num_hosts, exploration_noise_decay=0.995, 
     #     exploration_noise_decay=exploration_noise_decay,
     #     min_exploration_noise=min_exploration_noise
     # )
-    return MLPPolicy(
+    # return MLPPolicy(
+    #     obs_dim=obs_dim, 
+    #     action_dim=action_dim, 
+    #     num_hosts=num_hosts,
+    #     exploration_noise_decay=exploration_noise_decay,
+    #     min_exploration_noise=min_exploration_noise
+    # )
+    return VariableHostPolicy(
         obs_dim=obs_dim, 
         action_dim=action_dim, 
         num_hosts=num_hosts,
@@ -97,6 +106,16 @@ def main():
     # Set random seed
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
+    
+    # Create unique TensorBoard log directory if not specified
+    if args.tensorboard_dir is None:
+        from datetime import datetime
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        args.tensorboard_dir = f"logs/ppo_training_{timestamp}"
+    
+    # Set checkpoint directory to match tensorboard directory if not specified
+    if args.checkpoint_dir is None:
+        args.checkpoint_dir = args.tensorboard_dir.replace("logs/", "checkpoints/")
     
     print("=== LSF Scheduler PPO Training (Advanced) ===")
     print(f"Environment config:")
@@ -115,6 +134,7 @@ def main():
     print(f"  Rollout steps: {args.rollout_steps}")
     print(f"  Learning rate: {args.lr}")
     print(f"  Learning rate schedule: {args.lr_schedule}")
+    print(f"  TensorBoard logs: {args.tensorboard_dir}")
     print()
     
     # Create environment using our updated wrapper
@@ -162,6 +182,7 @@ def main():
         minibatch_size=args.minibatch_size,
         buffer_size=args.buffer_size,
         device=args.device,
+        tensorboard_log_dir=args.tensorboard_dir,
         lr_schedule=args.lr_schedule,
         lr_decay_factor=args.lr_decay_factor,
         lr_warmup_steps=args.lr_warmup_steps,
