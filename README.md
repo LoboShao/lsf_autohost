@@ -4,23 +4,25 @@ This repository contains the LSF AutoHost project, which integrates machine lear
 
 ## Project Structure
 
-- **`lsf-plugin-partial/`**: Contains the LSF plugin code. For any questions or details related to the LSF plugin, please refer to the `lsf-plugin-partial` folder.
-- **`training/`**: Includes training scripts and resources for machine learning models.
-- **`examples/`**: Provides example usage scripts.
-- **`wrapper/`**: Contains wrapper utilities for integration.
+- **`lsf-plugin-partial/`**: Contains the LSF plugin-related code.
+- **`training/`**: Includes the model training code. The launch file is `training/lsf_train.py`.
 
 ## Getting Started
 
-1. Clone the repository:
+1. To start the training process, run the following command:
    ```bash
-   git clone https://github.com/LoboShao/lsf_autohost.git
+   python training/lsf_train.py
    ```
 
-2. Navigate to the relevant folder for your task.
+2. Use TensorBoard to observe the training progress. Start TensorBoard with:
+   ```bash
+   tensorboard --logdir=<log_directory>
+   ```
+   Replace `<log_directory>` with the path to your log files.
 
 ## LSF Plugin
 
-For all LSF plugin-related questions, please navigate to the `lsf-plugin-partial` folder. The plugin enables machine learning-based host selection and integrates with LSF's scheduling system.
+The LSF plugin-related code is located in the `lsf-plugin-partial` folder. This plugin enables machine learning-based host selection and integrates with LSF's scheduling system.
 
 ## Contributing
 
