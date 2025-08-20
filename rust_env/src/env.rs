@@ -64,6 +64,9 @@ pub struct ClusterSchedulerEnv {
     total_jobs_failed: u32,
     jobs_completed_this_step: u32,
     
+    // Waiting time tracking for all jobs in episode
+    total_waiting_time_all_jobs: f64,  // Sum of waiting times for all jobs (completed + in progress)
+    
     // Batch-wise reward tracking
     last_reward_time: f64,  // Last time we gave a batch reward
     
@@ -104,8 +107,8 @@ impl ClusterSchedulerEnv {
         seed: Option<u64>,
     ) -> Self {
         // Calculate max_queue_length if not provided
-        let actual_max_queue_length = max_queue_length.unwrap_or(episode_length * max_jobs_per_step);
-        
+        // let actual_max_queue_length = max_queue_length.unwrap_or(episode_length * max_jobs_per_step);
+        let actual_max_queue_length = episode_length * max_jobs_per_step;
         let original_seed = seed;
         let mut rng = match seed {
             Some(s) => StdRng::seed_from_u64(s),
@@ -174,6 +177,7 @@ impl ClusterSchedulerEnv {
             total_jobs_completed: 0,
             total_jobs_failed: 0,
             jobs_completed_this_step: 0,
+            total_waiting_time_all_jobs: 0.0,
             last_reward_time: -1.0,
             rng,
             original_seed,
@@ -182,12 +186,32 @@ impl ClusterSchedulerEnv {
     }
     
     pub fn reset(&mut self, py: Python) -> PyResult<Py<PyArray1<f32>>> {
-        // Reset hosts
-        for host in &mut self.hosts {
-            host.available_cores = host.total_cores;
-            host.available_memory = host.total_memory;
-            host.running_job_ids.clear();
+        // Re-generate cluster configuration if we have original seed
+        if let Some(seed) = self.original_seed {
+            // Use seed for deterministic host generation during testing
+            let mut cluster_rng = StdRng::seed_from_u64(seed);
+            for host in &mut self.hosts {
+                let cores = cluster_rng.gen_range(self.host_cores_range.0..=self.host_cores_range.1);
+                let memory = cluster_rng.gen_range(self.host_memory_range.0..=self.host_memory_range.1);
+                host.total_cores = cores;
+                host.total_memory = memory;
+                host.available_cores = cores;
+                host.available_memory = memory;
+                host.running_job_ids.clear();
+            }
+        } else {
+            // Use random host generation for training diversity
+            for host in &mut self.hosts {
+                let cores = self.rng.gen_range(self.host_cores_range.0..=self.host_cores_range.1);
+                let memory = self.rng.gen_range(self.host_memory_range.0..=self.host_memory_range.1);
+                host.total_cores = cores;
+                host.total_memory = memory;
+                host.available_cores = cores;
+                host.available_memory = memory;
+                host.running_job_ids.clear();
+            }
         }
+
         
         // Clear collections
         self.job_queue.clear();
@@ -206,6 +230,7 @@ impl ClusterSchedulerEnv {
         self.total_jobs_completed = 0;
         self.total_jobs_failed = 0;
         self.jobs_completed_this_step = 0;
+        self.total_waiting_time_all_jobs = 0.0;
         
         // Reset batch tracking
         self.last_reward_time = -1.0;
@@ -247,6 +272,7 @@ impl ClusterSchedulerEnv {
             self.job_duration_schedule = job_duration_schedule;
             self.total_jobs_in_pool = total_jobs_in_pool;
         }
+        
         
         self.add_jobs_to_queue();
         
@@ -306,7 +332,9 @@ impl ClusterSchedulerEnv {
         self.current_step += 1;
         
         // Calculate resource balance reward - addresses core/memory imbalance
-        let total_reward = self.calculate_resource_balance_reward(jobs_scheduled) as f32;
+        // let total_reward = self.calculate_resource_balance_reward(jobs_scheduled) as f32;
+        // let total_reward = self.calculate_simple_throughput_reward(jobs_scheduled) as f32;
+        let total_reward = self.calculate_utilization_only_reward(jobs_scheduled) as f32;
         let done = self.current_time >= self.episode_length as f64;
         
         let info = PyDict::new(py);
@@ -398,10 +426,44 @@ impl ClusterSchedulerEnv {
         
         let metrics = PyDict::new(py);
         
+        // Calculate average waiting time for ALL jobs in episode (completed + currently waiting)
+        let mut total_current_waiting_time = 0.0;
+        let mut current_waiting_job_count = 0;
+        
+        // Add waiting time for jobs currently in queues
+        for job in &self.submission_queue {
+            let waiting_time = self.current_time - job.submission_time;
+            total_current_waiting_time += waiting_time;
+            current_waiting_job_count += 1;
+        }
+        
+        for job in &self.job_queue {
+            let waiting_time = self.current_time - job.submission_time;
+            total_current_waiting_time += waiting_time;
+            current_waiting_job_count += 1;
+        }
+        
+        for job in &self.deferred_jobs {
+            let waiting_time = self.current_time - job.submission_time;
+            total_current_waiting_time += waiting_time;
+            current_waiting_job_count += 1;
+        }
+        
+        // Total waiting time = completed jobs + currently waiting jobs
+        let total_episode_waiting_time = self.total_waiting_time_all_jobs + total_current_waiting_time;
+        
+        // Average across all jobs generated in this episode
+        let avg_waiting_time = if self.total_jobs_generated > 0 {
+            total_episode_waiting_time / self.total_jobs_generated as f64
+        } else {
+            0.0
+        };
+
         // Job completion metrics
         metrics.set_item("total_jobs_completed", self.total_jobs_completed)?;
         metrics.set_item("completion_rate", self.total_jobs_completed as f64 / self.total_jobs_generated.max(1) as f64)?;
         metrics.set_item("jobs_in_progress", self.active_jobs.len())?;
+        metrics.set_item("avg_waiting_time", avg_waiting_time)?;
         
         // Time-based utilization metrics (averaged over seconds, not timesteps)
         metrics.set_item("avg_host_core_utilization", avg_core_util)?;
@@ -501,7 +563,7 @@ impl ClusterSchedulerEnv {
                 cores,
                 memory,
                 duration,
-                self.current_time,
+                self.current_time,  // This is the arrival time for this job
             );
             
             self.next_job_id += 1;
@@ -539,69 +601,76 @@ impl ClusterSchedulerEnv {
     }
     
     fn update_host_utilization(&mut self) {
-        for (i, host) in self.hosts.iter_mut().enumerate() {
-            // Update utilization history (only updates once per second)
-            host.update_utilization_history(self.current_time.floor() as f32);
-            
-            // Core utilization: per-second value (LSF accessible)
-            self.host_core_utils[i] = host.get_core_utilization();
-            
-            // Memory utilization: per-second value (LSF accessible) 
-            self.host_memory_utils[i] = host.get_memory_utilization();
-        }
-        
-        // Update time-based statistics every second
-        self.update_utilization_statistics();
-    }
-    
-    fn update_utilization_statistics(&mut self) {
-        // Only update once per second
-        let current_time_floor = self.current_time.floor();
-        if current_time_floor > self.last_stats_update_time {
-            self.last_stats_update_time = current_time_floor;
-            
-            // Calculate current average utilization across all hosts
-            let avg_core_util = self.host_core_utils.iter().sum::<f32>() / self.num_hosts as f32;
-            let avg_memory_util = self.host_memory_utils.iter().sum::<f32>() / self.num_hosts as f32;
-            
-            // Calculate host-level balance statistics for this time sample
-            let mut host_imbalances = Vec::new();
-            let mut effective_utils = Vec::new();
-            
-            for i in 0..self.num_hosts {
-                let core_util = self.host_core_utils[i] as f64;
-                let memory_util = self.host_memory_utils[i] as f64;
-                
-                // Only consider active hosts
-                if core_util > 0.01 || memory_util > 0.01 {
-                    host_imbalances.push((core_util - memory_util).abs());
-                    effective_utils.push(core_util.min(memory_util));
-                }
+        // Only update once per second (time is now integer, no .floor() needed)
+        let current_time_int = self.current_time as u64;
+        if current_time_int > self.last_stats_update_time as u64 {
+            // Update all hosts and get utilization values directly
+            for (i, host) in self.hosts.iter_mut().enumerate() {
+                let (core_util, memory_util) = host.update_utilization_history();
+                self.host_core_utils[i] = core_util;
+                self.host_memory_utils[i] = memory_util;
             }
             
-            // Calculate averages for this time sample
-            let avg_imbalance = if !host_imbalances.is_empty() {
-                host_imbalances.iter().sum::<f64>() / host_imbalances.len() as f64
-            } else {
-                0.0
-            };
-            
-            let avg_effective_util = if !effective_utils.is_empty() {
-                effective_utils.iter().sum::<f64>() / effective_utils.len() as f64
-            } else {
-                0.0
-            };
-            
-            // Update running statistics
-            self.core_util_sum += avg_core_util as f64;
-            self.memory_util_sum += avg_memory_util as f64;
-            self.host_imbalance_sum += avg_imbalance;
-            self.host_imbalance_sum_squares += avg_imbalance * avg_imbalance;
-            self.effective_util_sum += avg_effective_util;
-            self.effective_util_sum_squares += avg_effective_util * avg_effective_util;
-            self.utilization_sample_count += 1;
+            // Update time-based statistics
+            self.update_utilization_statistics_optimized(current_time_int as f64);
         }
     }
+    
+    fn update_utilization_statistics_optimized(&mut self, current_time: f64) {
+        // Time check already done in caller, just update statistics
+        self.last_stats_update_time = current_time;
+        
+        // Calculate current average utilization across all hosts
+        let avg_core_util = self.host_core_utils.iter().sum::<f32>() / self.num_hosts as f32;
+        let avg_memory_util = self.host_memory_utils.iter().sum::<f32>() / self.num_hosts as f32;
+        
+        // Calculate host-level balance statistics in one pass
+        let mut imbalance_sum = 0.0;
+        let mut effective_util_sum = 0.0;
+        let mut active_host_count = 0;
+        
+        for i in 0..self.num_hosts {
+            let core_util = self.host_core_utils[i] as f64;
+            let memory_util = self.host_memory_utils[i] as f64;
+            
+            // Only consider active hosts
+            if core_util > 0.01 || memory_util > 0.01 {
+                imbalance_sum += (core_util - memory_util).abs();
+                effective_util_sum += core_util.min(memory_util);
+                active_host_count += 1;
+            }
+        }
+        
+        // Calculate averages for this time sample
+        let avg_imbalance = if active_host_count > 0 {
+            imbalance_sum / active_host_count as f64
+        } else {
+            0.0
+        };
+        
+        let avg_effective_util = if active_host_count > 0 {
+            effective_util_sum / active_host_count as f64
+        } else {
+            0.0
+        };
+        
+        // Update running statistics
+        self.core_util_sum += avg_core_util as f64;
+        self.memory_util_sum += avg_memory_util as f64;
+        self.host_imbalance_sum += avg_imbalance;
+        self.host_imbalance_sum_squares += avg_imbalance * avg_imbalance;
+        self.effective_util_sum += avg_effective_util;
+        self.effective_util_sum_squares += avg_effective_util * avg_effective_util;
+        self.utilization_sample_count += 1;
+    }
+
+    // // Old func for backup
+    // fn update_utilization_statistics(&mut self) {
+    //     let current_time = self.current_time;
+    //     if current_time > self.last_stats_update_time {
+    //         self.update_utilization_statistics_optimized(current_time);
+    //     }
+    // }
     
     // Removed create_job_buckets - no longer needed for single job scheduling
     
@@ -625,6 +694,10 @@ impl ClusterSchedulerEnv {
                 if host.allocate_job(&mut job_to_schedule) {
                     job_to_schedule.start_time = Some(self.current_time);
                     
+                    // Record waiting time for this job
+                    let waiting_time = self.current_time - job_to_schedule.submission_time;
+                    self.total_waiting_time_all_jobs += waiting_time;
+                    
                     // Schedule completion
                     let completion_time = self.current_time.floor() + job_to_schedule.duration as f64;
                     let job_id = job_to_schedule.id;
@@ -647,26 +720,45 @@ impl ClusterSchedulerEnv {
 
     
     fn should_advance_time_after_current_job(&mut self) -> bool {
-        // Advance time when we've processed all jobs that need immediate decisions
-        // This means all jobs from the current time unit have been scheduled or deferred
-        if self.submission_queue.is_empty() {
+        // OLD IMPLEMENTATION (BACKUP):
+        // // Advance time when we've processed all jobs that need immediate decisions
+        // // This means all jobs from the current time unit have been scheduled or deferred
+        // if self.submission_queue.is_empty() {
+        //     let old_timestep = self.current_time.floor() as usize;
+        //     
+        //     // Advance time proportionally - if N jobs arrived this second, 
+        //     // each job represents 1/N of a second
+        //     let current_timestep = self.current_time.floor() as usize;
+        //     if current_timestep < self.job_arrival_schedule.len() {
+        //         let jobs_this_second = self.job_arrival_schedule[current_timestep];
+        //         if jobs_this_second > 0 {
+        //             self.current_time += 1.0 / jobs_this_second as f64;
+        //         } else {
+        //             self.current_time += 1.0; // If no jobs, advance full second
+        //         }
+        //     } else {
+        //         self.current_time += 1.0;
+        //     }
+        //     
+        //     // Only return true (trigger job generation) when we cross into a new second
+        //     let new_timestep = self.current_time.floor() as usize;
+        //     new_timestep > old_timestep
+        // } else {
+        //     false
+        // }
+
+        // NEW EVENT-DRIVEN IMPLEMENTATION:
+        // Event-driven time advancement: advance when we've attempted all available jobs
+        // Condition 1: submission_queue is empty (no job currently needs a decision)
+        // Condition 2: job_queue is empty (no more jobs to move to submission queue)
+        // Deferred jobs are safely stored in self.deferred_jobs and don't affect these conditions
+        if self.submission_queue.is_empty() && self.job_queue.is_empty() {
             let old_timestep = self.current_time.floor() as usize;
             
-            // Advance time proportionally - if N jobs arrived this second, 
-            // each job represents 1/N of a second
-            let current_timestep = self.current_time.floor() as usize;
-            if current_timestep < self.job_arrival_schedule.len() {
-                let jobs_this_second = self.job_arrival_schedule[current_timestep];
-                if jobs_this_second > 0 {
-                    self.current_time += 1.0 / jobs_this_second as f64;
-                } else {
-                    self.current_time += 1.0; // If no jobs, advance full second
-                }
-            } else {
-                self.current_time += 1.0;
-            }
+            // Advance by full second - we're moving to next discrete time unit
+            self.current_time += 1.0;
             
-            // Only return true (trigger job generation) when we cross into a new second
+            // Return true to trigger job generation when we cross into a new second
             let new_timestep = self.current_time.floor() as usize;
             new_timestep > old_timestep
         } else {
@@ -694,6 +786,36 @@ impl ClusterSchedulerEnv {
         let throughput_reward = completion_rate.min(1.0) * 0.3; // Cap at 0.3 to prevent reward explosion
         
         resource_reward + throughput_reward
+    }
+
+    fn calculate_waiting_time_and_utilization_reward(&mut self, scheduled_jobs: usize) -> f64 {
+        // Simple reward: just reward scheduling jobs and penalize large queues
+        let scheduling_reward = scheduled_jobs as f64;
+        
+        // Small penalty for queue size (encourage clearing queues)
+        let total_queued_jobs = self.job_queue.len() + self.submission_queue.len() + self.deferred_jobs.len();
+        let queue_penalty = total_queued_jobs as f64 * 0.01;
+        
+        scheduling_reward - queue_penalty
+    }
+
+    fn calculate_simple_throughput_reward(&mut self, scheduled_jobs: usize) -> f64 {
+        // Very simple: reward completions, small penalty for scheduling failures
+        let completion_reward = self.jobs_completed_this_step as f64;
+        completion_reward
+    }
+
+    fn calculate_utilization_only_reward(&mut self, _scheduled_jobs: usize) -> f64 {
+        // Just average effective utilization, scaled to reasonable range
+        let mut total_effective_util = 0.0;
+        
+        for i in 0..self.num_hosts {
+            let core_util = self.host_core_utils[i] as f64;
+            let memory_util = self.host_memory_utils[i] as f64;
+            total_effective_util += core_util.min(memory_util);
+        }
+        
+        total_effective_util / self.num_hosts as f64
     }
 
 }

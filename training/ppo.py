@@ -42,16 +42,16 @@ class PPOBuffer:
     def compute_advantages(self, last_value: float, gamma: float = 0.99, lam: float = 0.95):
         buffer_size = self.size if self.full else self.ptr
 
-        rewards = self.rewards[:buffer_size].cpu().numpy()
-        values = self.values[:buffer_size].cpu().numpy()
-        dones = self.dones[:buffer_size].cpu().numpy()
+        rewards = self.rewards[:buffer_size]
+        values = self.values[:buffer_size]
+        dones = self.dones[:buffer_size]
 
-        advantages = np.zeros_like(rewards)
-        last_gae = 0
+        advantages = torch.zeros_like(rewards)
+        last_gae = 0.0
 
-        for t in reversed(range(len(rewards))):
-            next_non_terminal = 1.0 - dones[t]
-            next_value = last_value if t == len(rewards) - 1 else values[t + 1]
+        for t in reversed(range(buffer_size)):
+            next_non_terminal = 1.0 - dones[t].float()
+            next_value = last_value if t == buffer_size - 1 else values[t + 1]
 
             delta = rewards[t] + gamma * next_value * next_non_terminal - values[t]
             advantages[t] = last_gae = delta + gamma * lam * next_non_terminal * last_gae
@@ -62,8 +62,8 @@ class PPOBuffer:
         adv_std = advantages.std()
         advantages = (advantages - adv_mean) / (adv_std + 1e-8)
 
-        self.advantages[:buffer_size] = torch.tensor(advantages, dtype=torch.float32, device=self.device)
-        self.returns[:buffer_size] = torch.tensor(returns, dtype=torch.float32, device=self.device)
+        self.advantages[:buffer_size] = advantages
+        self.returns[:buffer_size] = returns
 
     def get_batch(self):
         buffer_size = self.size if self.full else self.ptr
@@ -82,8 +82,10 @@ class PPOBuffer:
 
 
 class MetricsReporter:
-    def __init__(self, writer: SummaryWriter, test_interval: int = 10):
+    def __init__(self, writer: SummaryWriter, ppo_writer: SummaryWriter = None, baseline_writer: SummaryWriter = None, test_interval: int = 10):
         self.writer = writer
+        self.ppo_writer = ppo_writer
+        self.baseline_writer = baseline_writer
         self.test_interval = test_interval
         self.training_metrics = defaultdict(list)
         self.test_metrics = defaultdict(list)
@@ -290,11 +292,11 @@ class PPOTrainer:
         self.policy.train()
         return avg_metrics
 
-    def test_baseline_with_metrics(self, num_episodes: int = 5, update_count: int = 0, 
+    def test_baseline_with_metrics(self, num_episodes: int = 3, update_count: int = 0, 
                                   test_seeds: List[int] = None) -> Dict:
         """Test baseline policy and collect environment metrics"""
         if test_seeds is None:
-            test_seeds = [42, 43, 44, 45, 46]
+            test_seeds = [42, 43, 44]
             
         if self.is_vectorized:
             train_env = self.env.envs[0]
@@ -348,7 +350,8 @@ class PPOTrainer:
             'completion_rate', 
             'avg_host_core_utilization',
             'avg_host_memory_utilization',
-            'jobs_in_progress'
+            'jobs_in_progress',
+            'avg_waiting_time'
         ]
         
         for metric in key_metrics:
@@ -362,13 +365,12 @@ class PPOTrainer:
                 else:
                     print(f"  {metric}: PPO {ppo_val:.3f} vs Baseline {baseline_val:.3f}")
                 
-                if self.writer:
-                    self.writer.add_scalars(f'Metrics/{metric}', {
-                        'PPO': ppo_val,
-                        'Baseline': baseline_val
-                    }, update_count)
+                # Log to separate writers with common section prefix
+                if self.ppo_writer and self.baseline_writer:
+                    self.ppo_writer.add_scalar(f'Comparison/{metric}', ppo_val, update_count)
+                    self.baseline_writer.add_scalar(f'Comparison/{metric}', baseline_val, update_count)
                     
-                    # Also log improvement percentage separately
+                    # Also log improvement percentage to main writer
                     if baseline_val != 0:
                         improvement = ((ppo_val - baseline_val) / abs(baseline_val)) * 100
                         self.writer.add_scalar(f'Improvement/{metric}_percent', improvement, update_count)
@@ -465,7 +467,12 @@ class PPOTrainer:
         
         self.metrics = defaultdict(list)
         self.writer = SummaryWriter(tensorboard_log_dir)
-        self.metrics_reporter = MetricsReporter(self.writer, test_interval=10)
+        
+        # Create separate writers for PPO and Baseline comparison
+        self.ppo_writer = SummaryWriter(f"{tensorboard_log_dir}/PPO")
+        self.baseline_writer = SummaryWriter(f"{tensorboard_log_dir}/Baseline")
+        
+        self.metrics_reporter = MetricsReporter(self.writer, self.ppo_writer, self.baseline_writer, test_interval=10)
         self.grad_norms = []
         self.lr_history = []
     
@@ -875,8 +882,8 @@ class PPOTrainer:
             # Run test episodes at specified intervals
             if self.metrics_reporter.should_run_test(update_count):
                 ppo_metrics = self.test_with_metrics(num_episodes=5, update_count=update_count, policy_name="PPO")
-                baseline_metrics = self.test_baseline_with_metrics(num_episodes=5, update_count=update_count)
-                
+                baseline_metrics = self.test_baseline_with_metrics(num_episodes=3, update_count=update_count)
+
                 # Compare performance metrics
                 self.log_metric_comparison(ppo_metrics, baseline_metrics, update_count)
 
@@ -894,4 +901,6 @@ class PPOTrainer:
             print(f"Final test reward: {final_test_reward:.3f}")
         
         self.writer.close()
+        self.ppo_writer.close()
+        self.baseline_writer.close()
         return self.get_training_summary()
