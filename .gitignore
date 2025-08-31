@@ -89,3 +89,6 @@ logs/
 
 # Ignore JetBrains IDE project files
 .idea/
+
+# Claude.md - personal assistant instructions
+CLAUDE.md

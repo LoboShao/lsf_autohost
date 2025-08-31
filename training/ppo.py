@@ -168,86 +168,17 @@ class FirstAvailableBaseline:
 
 
 class PPOTrainer:
-    def test(self, num_episodes: int = 5, update_count: int = 0, 
-             test_seeds: List[int] = None) -> float:
-        """Run policy in evaluation mode with deterministic job sequences for full episodes.
-        
-        Args:
-            num_episodes: Number of test episodes to run
-            update_count: Current training update count (for logging)
-            test_seeds: List of seeds for deterministic testing. If None, uses [42, 43, 44, 45, 46]
-        """
-        if test_seeds is None:
-            test_seeds = [42, 43, 44, 45, 46]  # Default deterministic seeds
-            
-        self.policy.eval()
-        rewards = []
-        episode_steps = []
-        env_metrics_accum = defaultdict(list)
-        
-        
-        for ep in range(num_episodes):
-            seed = test_seeds[ep % len(test_seeds)]
-            
-            if self.is_vectorized:
-                train_env = self.env.envs[0]
-            else:
-                train_env = self.env
-                
-            test_env = train_env.create_test_env(seed)
-            
-            obs, _ = test_env.reset()
-            ep_reward = 0.0
-            ep_steps = 0
-            terminated = False
-            truncated = False
-            
-            while not (terminated or truncated):
-                obs_tensor = torch.tensor(obs, dtype=torch.float32, device=self.device)
-                with torch.no_grad():
-                    try:
-                        action, _, _, _ = self.policy.get_action_and_value(obs_tensor, deterministic=True)
-                    except TypeError:
-                        action, _, _, _ = self.policy.get_action_and_value(obs_tensor)
-                obs, reward, terminated, truncated, info = test_env.step(action.cpu().numpy())
-                ep_reward += reward
-                ep_steps += 1
-                
-            rewards.append(ep_reward)
-            episode_steps.append(ep_steps)
-            
-            if hasattr(test_env, 'get_metrics'):
-                metrics = test_env.get_metrics()
-                if isinstance(metrics, dict):
-                    for k, v in metrics.items():
-                        if isinstance(v, (int, float)):
-                            env_metrics_accum[k].append(v)
-        
-        avg_test_reward = self.metrics_reporter.log_test_results(rewards, env_metrics_accum, update_count)
-
-        if episode_steps:
-            avg_steps = np.mean(episode_steps)
-            total_steps = sum(episode_steps)
-            print(f"[TEST] Timesteps: {avg_steps:.0f} avg ({total_steps} total) across {len(episode_steps)} episodes")
-        # Check for early stopping
-        if avg_test_reward > self.best_test_reward + self.early_stopping_threshold:
-            self.best_test_reward = avg_test_reward
-            self.patience_counter = 0
-        else:
-            self.patience_counter += 1
-            
-        if self.patience_counter >= self.early_stopping_patience:
-            self.should_stop = True
-            print(f"Early stopping triggered after {self.patience_counter} updates without improvement")
-            
-        self.policy.train()
-        return avg_test_reward
 
     def test_with_metrics(self, num_episodes: int = 5, update_count: int = 0, 
                          test_seeds: List[int] = None, policy_name: str = "PPO") -> Dict:
         """Test policy and collect environment metrics"""
         if test_seeds is None:
-            test_seeds = [42, 43, 44, 45, 46]
+            test_seeds = [42, 43, 44]
+        
+        # Save test environment data on first test run
+        if self.first_test_run:
+            self.save_test_env_data(test_seeds)
+            self.first_test_run = False
             
         self.policy.eval()
         episode_metrics = []
@@ -351,7 +282,8 @@ class PPOTrainer:
             'avg_host_core_utilization',
             'avg_host_memory_utilization',
             'jobs_in_progress',
-            'avg_waiting_time'
+            'avg_waiting_time',
+            'makespan'
         ]
         
         for metric in key_metrics:
@@ -475,10 +407,55 @@ class PPOTrainer:
         self.metrics_reporter = MetricsReporter(self.writer, self.ppo_writer, self.baseline_writer, test_interval=10)
         self.grad_norms = []
         self.lr_history = []
+        self.first_test_run = True  # Flag to save test env data on first test
     
     def set_test_interval(self, interval: int):
         """Set the interval for running test episodes"""
         self.metrics_reporter.test_interval = interval
+    
+    def save_test_env_data(self, test_seeds: List[int] = None):
+        """Save the exact test environment data used during testing"""
+        if test_seeds is None:
+            test_seeds = [42, 43, 44]
+        
+        if self.is_vectorized:
+            train_env = self.env.envs[0]
+        else:
+            train_env = self.env
+        
+        test_data = {
+            "test_environments": {}
+        }
+        
+        print("Saving test environment data...")
+        for seed in test_seeds:
+            test_env = train_env.create_test_env(seed)
+            obs, _ = test_env.reset()  # Triggers deterministic generation
+            
+            rust_env = test_env.rust_env
+            
+            # Extract host data using the new method
+            hosts = rust_env.get_host_configs()
+            
+            # Extract job schedule data using the new method
+            job_schedule = rust_env.get_job_schedule()
+            
+            test_data["test_environments"][seed] = {
+                "hosts": hosts,
+                "job_schedule": job_schedule
+            }
+            
+            test_env.close()
+        
+        # Save to log directory
+        log_dir = os.path.dirname(self.writer.log_dir)
+        output_file = os.path.join(log_dir, "test_env_data.json")
+        
+        with open(output_file, 'w') as f:
+            json.dump(test_data, f, indent=2)
+        
+        print(f"Test environment data saved to: {output_file}")
+        return output_file
     
     def get_training_summary(self) -> Dict:
         """Get summary of training and test metrics"""
@@ -881,7 +858,7 @@ class PPOTrainer:
             
             # Run test episodes at specified intervals
             if self.metrics_reporter.should_run_test(update_count):
-                ppo_metrics = self.test_with_metrics(num_episodes=5, update_count=update_count, policy_name="PPO")
+                ppo_metrics = self.test_with_metrics(num_episodes=3, update_count=update_count, policy_name="PPO")
                 baseline_metrics = self.test_baseline_with_metrics(num_episodes=3, update_count=update_count)
 
                 # Compare performance metrics

@@ -22,7 +22,7 @@ pub struct ClusterSchedulerEnv {
     job_memory_range: (u32, u32),
     job_duration_range: (u32, u32),
     max_jobs_per_step: usize,
-    episode_length: usize,  // Maximum time for episode (time-based termination)
+    max_time: usize,  // Maximum time for job generation (after this, wait for completion)
     
     // State
     hosts: Vec<Host>,
@@ -70,6 +70,9 @@ pub struct ClusterSchedulerEnv {
     // Batch-wise reward tracking
     last_reward_time: f64,  // Last time we gave a batch reward
     
+    // Makespan tracking
+    makespan: Option<f64>,  // Time when all jobs finished (set when episode ends)
+    
     // RNG
     rng: StdRng,
     original_seed: Option<u64>,  // Store original seed for deterministic timestep-based generation
@@ -91,7 +94,7 @@ impl ClusterSchedulerEnv {
         job_memory_range = (2, 64),
         job_duration_range = (1, 60),
         max_jobs_per_step = 50,
-        episode_length = 4096,
+        max_time = 4096,
         seed = None
     ))]
     fn new(
@@ -103,12 +106,12 @@ impl ClusterSchedulerEnv {
         job_memory_range: (u32, u32),
         job_duration_range: (u32, u32),
         max_jobs_per_step: usize,
-        episode_length: usize,
+        max_time: usize,
         seed: Option<u64>,
     ) -> Self {
         // Calculate max_queue_length if not provided
-        // let actual_max_queue_length = max_queue_length.unwrap_or(episode_length * max_jobs_per_step);
-        let actual_max_queue_length = episode_length * max_jobs_per_step;
+        // let actual_max_queue_length = max_queue_length.unwrap_or(max_time * max_jobs_per_step);
+        let actual_max_queue_length = max_time * max_jobs_per_step;
         let original_seed = seed;
         let mut rng = match seed {
             Some(s) => StdRng::seed_from_u64(s),
@@ -119,7 +122,7 @@ impl ClusterSchedulerEnv {
         // Pre-generate deterministic job schedule
         let (job_arrival_schedule, job_cores_schedule, job_memory_schedule, job_duration_schedule, total_jobs_in_pool) = 
             Self::generate_deterministic_job_schedule(
-                episode_length,
+                max_time,
                 max_jobs_per_step,
                 job_cores_range,
                 job_memory_range,
@@ -147,7 +150,7 @@ impl ClusterSchedulerEnv {
             job_memory_range,
             job_duration_range,
             max_jobs_per_step,
-            episode_length,
+            max_time,
             hosts,
             host_core_utils,
             host_memory_utils,
@@ -179,6 +182,7 @@ impl ClusterSchedulerEnv {
             jobs_completed_this_step: 0,
             total_waiting_time_all_jobs: 0.0,
             last_reward_time: -1.0,
+            makespan: None,
             rng,
             original_seed,
             cached_state: Vec::new(),
@@ -235,6 +239,9 @@ impl ClusterSchedulerEnv {
         // Reset batch tracking
         self.last_reward_time = -1.0;
         
+        // Reset makespan tracking
+        self.makespan = None;
+        
         // Reset job tracking
         self.jobs_moved_to_queue = 0;
         
@@ -258,7 +265,7 @@ impl ClusterSchedulerEnv {
             let mut schedule_rng = StdRng::seed_from_u64(seed);
             let (job_arrival_schedule, job_cores_schedule, job_memory_schedule, job_duration_schedule, total_jobs_in_pool) = 
                 Self::generate_deterministic_job_schedule(
-                    self.episode_length,
+                    self.max_time,
                     self.max_jobs_per_step,
                     self.job_cores_range,
                     self.job_memory_range,
@@ -331,11 +338,21 @@ impl ClusterSchedulerEnv {
         
         self.current_step += 1;
         
-        // Calculate resource balance reward - addresses core/memory imbalance
-        // let total_reward = self.calculate_resource_balance_reward(jobs_scheduled) as f32;
-        // let total_reward = self.calculate_simple_throughput_reward(jobs_scheduled) as f32;
-        let total_reward = self.calculate_utilization_only_reward(jobs_scheduled) as f32;
-        let done = self.current_time >= self.episode_length as f64;
+        // Calculate reward using only locally observable information
+        let total_reward = self.calculate_resource_scheduling_reward(jobs_scheduled) as f32;
+        
+        // Episode ends when all deterministic jobs are completed and no jobs remain
+        let all_jobs_generated = self.current_time >= self.max_time as f64;
+        let all_jobs_finished = self.job_queue.is_empty() && 
+                               self.submission_queue.is_empty() && 
+                               self.deferred_jobs.is_empty() && 
+                               self.active_jobs.is_empty();
+        let done = all_jobs_generated && all_jobs_finished;
+        
+        // Set makespan when episode ends (all jobs finished)
+        if done && self.makespan.is_none() {
+            self.makespan = Some(self.current_time);
+        }
         
         let info = PyDict::new(py);
         info.set_item("jobs_scheduled", jobs_scheduled)?;
@@ -392,6 +409,40 @@ impl ClusterSchedulerEnv {
         } else {
             self.rng = StdRng::from_entropy();
         }
+    }
+    
+    pub fn get_host_configs(&self, py: Python) -> PyResult<PyObject> {
+        let hosts_list = pyo3::types::PyList::empty(py);
+        
+        for (i, host) in self.hosts.iter().enumerate() {
+            let host_dict = pyo3::types::PyDict::new(py);
+            host_dict.set_item("host_id", i)?;
+            host_dict.set_item("total_cores", host.total_cores)?;
+            host_dict.set_item("total_memory", host.total_memory)?;
+            hosts_list.append(host_dict)?;
+        }
+        
+        Ok(hosts_list.to_object(py))
+    }
+    
+    pub fn get_job_schedule(&self, py: Python) -> PyResult<PyObject> {
+        let schedule_dict = pyo3::types::PyDict::new(py);
+        
+        schedule_dict.set_item("job_arrival_schedule", self.job_arrival_schedule.clone())?;
+        schedule_dict.set_item("job_cores_schedule", self.job_cores_schedule.clone())?;
+        schedule_dict.set_item("job_memory_schedule", self.job_memory_schedule.clone())?;
+        schedule_dict.set_item("job_duration_schedule", self.job_duration_schedule.clone())?;
+        schedule_dict.set_item("total_jobs_in_pool", self.total_jobs_in_pool)?;
+        schedule_dict.set_item("max_time", self.max_time)?;
+        schedule_dict.set_item("max_jobs_per_step", self.max_jobs_per_step)?;
+        schedule_dict.set_item("num_hosts", self.num_hosts)?;
+        schedule_dict.set_item("host_cores_range", self.host_cores_range)?;
+        schedule_dict.set_item("host_memory_range", self.host_memory_range)?;
+        schedule_dict.set_item("job_cores_range", self.job_cores_range)?;
+        schedule_dict.set_item("job_memory_range", self.job_memory_range)?;
+        schedule_dict.set_item("job_duration_range", self.job_duration_range)?;
+        
+        Ok(schedule_dict.to_object(py))
     }
     
     pub fn get_metrics(&self, py: Python) -> PyResult<PyObject> {
@@ -465,6 +516,13 @@ impl ClusterSchedulerEnv {
         metrics.set_item("jobs_in_progress", self.active_jobs.len())?;
         metrics.set_item("avg_waiting_time", avg_waiting_time)?;
         
+        // Makespan metric (time when all jobs finished)
+        if let Some(makespan_time) = self.makespan {
+            metrics.set_item("makespan", makespan_time)?;
+        } else {
+            metrics.set_item("makespan", py.None())?;
+        }
+        
         // Time-based utilization metrics (averaged over seconds, not timesteps)
         metrics.set_item("avg_host_core_utilization", avg_core_util)?;
         metrics.set_item("avg_host_memory_utilization", avg_memory_util)?;
@@ -482,14 +540,14 @@ impl ClusterSchedulerEnv {
 // Private implementation methods
 impl ClusterSchedulerEnv {
     fn generate_deterministic_job_schedule(
-        episode_length: usize,
+        max_time: usize,
         max_jobs_per_step: usize,
         job_cores_range: (u32, u32),
         job_memory_range: (u32, u32),
         job_duration_range: (u32, u32),
         rng: &mut StdRng,
     ) -> (Vec<usize>, Vec<u32>, Vec<u32>, Vec<u32>, usize) {
-        let mut job_arrival_schedule = Vec::with_capacity(episode_length);
+        let mut job_arrival_schedule = Vec::with_capacity(max_time);
         let mut job_cores_schedule = Vec::new();
         let mut job_memory_schedule = Vec::new();
         let mut job_duration_schedule = Vec::new();
@@ -499,7 +557,7 @@ impl ClusterSchedulerEnv {
         let duration_dist = Uniform::from(job_duration_range.0..=job_duration_range.1);
         
         // Generate job arrival schedule for each timestep
-        for _timestep in 0..episode_length {
+        for _timestep in 0..max_time {
             let num_jobs = rng.gen_range(1..=max_jobs_per_step);
             job_arrival_schedule.push(num_jobs);
             
@@ -527,9 +585,9 @@ impl ClusterSchedulerEnv {
     fn add_jobs_to_queue(&mut self) {
         let timestep = self.current_time as usize;
         
-        // Check if we're at or beyond episode end - this is normal termination condition
-        if timestep >= self.episode_length {
-            return; // Episode should end, no more jobs to add
+        // Check if we're at or beyond max_time - stop generating new jobs
+        if timestep >= self.max_time {
+            return; // No more jobs to generate, wait for existing jobs to complete
         }
         
         // Error checking - this should never happen in a properly designed system
@@ -767,55 +825,41 @@ impl ClusterSchedulerEnv {
     }
     
 
-    fn calculate_resource_balance_reward(&mut self, scheduled_jobs: usize) -> f64 {
-        // Resource efficiency component (0.7 weight)
-        let mut total_effective_util = 0.0;
+    fn calculate_resource_scheduling_reward(&mut self, _scheduled_jobs: usize) -> f64 {
+        // Pure cluster health reward - action is host priorities, job will find a host
+        // Focus on cluster resource balance and efficiency from priority rankings
+        
+        let mut cluster_balance_score = 0.0;
+        let mut total_efficiency_score = 0.0;
+        let mut active_hosts = 0;
         
         for i in 0..self.num_hosts {
             let core_util = self.host_core_utils[i] as f64;
             let memory_util = self.host_memory_utils[i] as f64;
             
-            total_effective_util += core_util.min(memory_util);
+            if core_util > 0.01 || memory_util > 0.01 {
+                active_hosts += 1;
+                
+                // Reward balanced resource usage within each host
+                let balance = 1.0 - (core_util - memory_util).abs();
+                cluster_balance_score += balance;
+                
+                // Reward effective utilization 
+                let efficiency = core_util.min(memory_util);
+                total_efficiency_score += efficiency;
+            }
         }
         
-        let avg_effective_util = total_effective_util / self.num_hosts as f64;
-        let resource_reward = avg_effective_util * 0.7;
-
-        // Throughput component (0.3 weight) - normalized by host capacity to prevent domination
-        let completion_rate = self.jobs_completed_this_step as f64 / self.num_hosts as f64;
-        let throughput_reward = completion_rate.min(1.0) * 0.3; // Cap at 0.3 to prevent reward explosion
+        let avg_balance = if active_hosts > 0 {
+            cluster_balance_score / active_hosts as f64
+        } else { 0.0 };
         
-        resource_reward + throughput_reward
-    }
-
-    fn calculate_waiting_time_and_utilization_reward(&mut self, scheduled_jobs: usize) -> f64 {
-        // Simple reward: just reward scheduling jobs and penalize large queues
-        let scheduling_reward = scheduled_jobs as f64;
+        let avg_efficiency = if active_hosts > 0 {
+            total_efficiency_score / active_hosts as f64
+        } else { 0.0 };
         
-        // Small penalty for queue size (encourage clearing queues)
-        let total_queued_jobs = self.job_queue.len() + self.submission_queue.len() + self.deferred_jobs.len();
-        let queue_penalty = total_queued_jobs as f64 * 0.01;
-        
-        scheduling_reward - queue_penalty
-    }
-
-    fn calculate_simple_throughput_reward(&mut self, scheduled_jobs: usize) -> f64 {
-        // Very simple: reward completions, small penalty for scheduling failures
-        let completion_reward = self.jobs_completed_this_step as f64;
-        completion_reward
-    }
-
-    fn calculate_utilization_only_reward(&mut self, _scheduled_jobs: usize) -> f64 {
-        // Just average effective utilization, scaled to reasonable range
-        let mut total_effective_util = 0.0;
-        
-        for i in 0..self.num_hosts {
-            let core_util = self.host_core_utils[i] as f64;
-            let memory_util = self.host_memory_utils[i] as f64;
-            total_effective_util += core_util.min(memory_util);
-        }
-        
-        total_effective_util / self.num_hosts as f64
+        // Pure cluster quality reward
+        avg_balance * 0.5 + avg_efficiency * 0.5
     }
 
 }

@@ -15,7 +15,7 @@ class VariableHostPolicy(nn.Module):
         self.num_hosts = num_hosts
         
         # Optimized hidden size - balance between speed and attention effectiveness
-        self.hidden_size = 64  # Reduced from 128, still good for attention
+        self.hidden_size = 32  # Reduced from 128, still good for attention
         
         # Exploration noise scheduling
         self.exploration_noise_decay = exploration_noise_decay
@@ -64,10 +64,12 @@ class VariableHostPolicy(nn.Module):
         job_embed = F.relu(self.job_encoder(job_features)).unsqueeze(1)  # [batch, 1, hidden_size]
         
         # Attention: job queries host capabilities
-        attended_hosts, _ = self.attention(job_embed, host_embeds, host_embeds)  # [batch, 1, hidden_size]
+        attended_hosts, attention_weights = self.attention(job_embed, host_embeds, host_embeds)  # [batch, 1, hidden_size]
         
-        # Generate priorities for each host (action shape = num_hosts)
-        action_mean = torch.sigmoid(self.priority_head(host_embeds).squeeze(-1))  # [batch, num_hosts]
+        # Generate priorities for each host using attention-weighted host features
+        # Apply attention weights to original host embeddings
+        weighted_host_embeds = attention_weights.squeeze(1).unsqueeze(-1) * host_embeds  # [batch, num_hosts, hidden_size]
+        action_mean = torch.sigmoid(self.priority_head(weighted_host_embeds).squeeze(-1))  # [batch, num_hosts]
         
         # Action standard deviation should match actual number of hosts
         actual_num_hosts = action_mean.shape[1]

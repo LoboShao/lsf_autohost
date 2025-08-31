@@ -1,3 +1,0 @@
-To align the training environment (simulator in Rust) with LSF, we need to ensure consistent behavior between LSF and the environment.
-
-In `conf/lsbatch/lsb.params`, set `JOB_SCHEDULING_INTERVAL = 1`.

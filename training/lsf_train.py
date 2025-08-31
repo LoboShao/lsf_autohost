@@ -17,8 +17,8 @@ def parse_args():
     
     # Environment args - OPTIMIZED FOR JOB CYCLES  
     parser.add_argument('--num-hosts', type=int, default=30, help='Number of hosts in the cluster')
-    parser.add_argument('--episode-length', type=int, default=200, help='Episode length in steps (matches rollout steps)')
-    parser.add_argument('--max-jobs-per-step', type=int, default=25, help='Maximum jobs per step - much higher load for resource pressure')
+    parser.add_argument('--episode-length', type=int, default=150, help='Episode length in steps (matches rollout steps)')
+    parser.add_argument('--max-jobs-per-step', type=int, default=30, help='Maximum jobs per step - much higher load for resource pressure')
     parser.add_argument('--max-queue-length', type=int, default=100*100, help='Maximum queue length')
     
     # Host/Job resource ranges - INCREASED LOAD FOR SCHEDULING PRESSURE
@@ -31,22 +31,22 @@ def parse_args():
     parser.add_argument('--job-memory-min', type=int, default=1*512, help='Minimum job memory (MB) - 4GB realistic minimum')
     parser.add_argument('--job-memory-max', type=int, default=4*1024, help='Maximum job memory (MB) - 16GB for larger jobs')
     parser.add_argument('--job-duration-min', type=int, default=5, help='Minimum job duration (seconds) - shorter for more turnover')
-    parser.add_argument('--job-duration-max', type=int, default=60, help='Maximum job duration (seconds) - moderate length jobs')
+    parser.add_argument('--job-duration-max', type=int, default=90, help='Maximum job duration (seconds) - moderate length jobs')
     
     # Training args - OPTIMIZED FOR BATCH REWARDS & JOB CYCLES
     # Formula: total_timesteps = rollout_steps × num_envs × num_updates
-    # Default: 4096 × 3 × 4096 = 33,554,432 timesteps (~2048 updates)
-    parser.add_argument('--total-timesteps', type=int, default=2048*3*2048, help='Total training timesteps: rollout_steps × num_envs × 2048_updates')
-    parser.add_argument('--rollout-steps', type=int, default=2048, help='Steps per rollout - capture multiple job cycles')
-    parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate optimized for batch rewards')
+    # Default: 6144 × 3 × 4096 = 33,554,432 timesteps (~2048 updates)
+    parser.add_argument('--total-timesteps', type=int, default=6144*2*2048, help='Total training timesteps: rollout_steps × num_envs × 2048_updates')
+    parser.add_argument('--rollout-steps', type=int, default=6144, help='Steps per rollout - capture multiple job cycles')
+    parser.add_argument('--lr', type=float, default=3e-4, help='Learning rate optimized for batch rewards')
     parser.add_argument('--gamma', type=float, default=0.995, help='Discount factor')
     parser.add_argument('--lam', type=float, default=0.98, help='GAE lambda')
-    parser.add_argument('--clip-coef', type=float, default=0.1, help='PPO clip coefficient')
-    parser.add_argument('--ent-coef', type=float, default=0.02, help='Entropy coefficient - higher for exploration')
+    parser.add_argument('--clip-coef', type=float, default=0.3, help='PPO clip coefficient')
+    parser.add_argument('--ent-coef', type=float, default=0.01, help='Entropy coefficient - higher for exploration')
     parser.add_argument('--vf-coef', type=float, default=0.5, help='Value function coefficient')
-    parser.add_argument('--update-epochs', type=int, default=4, help='Number of update epochs')
+    parser.add_argument('--update-epochs', type=int, default=2, help='Number of update epochs')
     parser.add_argument('--minibatch-size', type=int, default=512, help='Minibatch size - larger for stable gradients')
-    parser.add_argument('--buffer-size', type=int, default=2048, help='Rollout buffer size - MATCHES ROLLOUT STEPS')
+    parser.add_argument('--buffer-size', type=int, default=6144, help='Rollout buffer size - MATCHES ROLLOUT STEPS')
 
     # System args
     parser.add_argument('--device', type=str, default='auto', help='Device to use (auto, cpu, cuda)')
@@ -68,8 +68,8 @@ def parse_args():
     parser.add_argument('--resume-from', type=str, default=None, help='Resume training from checkpoint')
     parser.add_argument('--exploration-noise-decay', type=float, default=0.998, help='Exploration noise decay factor - slower decay')
     parser.add_argument('--min-exploration-noise', type=float, default=0.01, help='Minimum exploration noise')
-    parser.add_argument('--num-envs', type=int, default=3, help='Number of parallel environments - more for better sampling')
-    parser.add_argument('--tensorboard-dir', type=str, default="mem-util-reward", help='TensorBoard log directory (auto-generated if not specified)')
+    parser.add_argument('--num-envs', type=int, default=2, help='Number of parallel environments - more for better sampling')
+    parser.add_argument('--tensorboard-dir', type=str, default="config-save", help='TensorBoard log directory (auto-generated if not specified)')
     
     return parser.parse_args()
 
@@ -148,7 +148,7 @@ def main():
         'job_memory_range': (args.job_memory_min, args.job_memory_max),
         'job_duration_range': (args.job_duration_min, args.job_duration_max),
         'max_jobs_per_step': args.max_jobs_per_step,
-        'episode_length': args.episode_length,
+        'max_time': args.episode_length,
         'seed': args.seed,
     }
     
