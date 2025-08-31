@@ -130,11 +130,24 @@ impl ClusterSchedulerEnv {
                 &mut rng
             );
 
-        // Create hosts
+        // Create hosts with realistic configurations
         let mut hosts = Vec::with_capacity(num_hosts);
         for i in 0..num_hosts {
-            let cores = rng.gen_range(host_cores_range.0..=host_cores_range.1);
-            let memory = rng.gen_range(host_memory_range.0..=host_memory_range.1);
+            // Generate even number of cores (more realistic for multi-core processors)
+            let mut cores = rng.gen_range(host_cores_range.0..=host_cores_range.1);
+            if cores % 2 == 1 {
+                cores = (cores + 1).min(host_cores_range.1);
+            }
+            
+            // Generate memory in 1024MB (1GB) multiples (more realistic for server configurations)
+            let memory_min = host_memory_range.0;
+            let memory_max = host_memory_range.1;
+            
+            // Calculate number of 1024MB (1GB) increments in the range
+            let memory_increments = (memory_max - memory_min) / 1024 + 1;
+            let increment_index = rng.gen_range(0..memory_increments);
+            let memory = memory_min + (increment_index * 1024);
+            
             hosts.push(Host::new(i, cores, memory));
         }
         
@@ -195,8 +208,19 @@ impl ClusterSchedulerEnv {
             // Use seed for deterministic host generation during testing
             let mut cluster_rng = StdRng::seed_from_u64(seed);
             for host in &mut self.hosts {
-                let cores = cluster_rng.gen_range(self.host_cores_range.0..=self.host_cores_range.1);
-                let memory = cluster_rng.gen_range(self.host_memory_range.0..=self.host_memory_range.1);
+                // Generate even number of cores
+                let mut cores = cluster_rng.gen_range(self.host_cores_range.0..=self.host_cores_range.1);
+                if cores % 2 == 1 {
+                    cores = (cores + 1).min(self.host_cores_range.1);
+                }
+                
+                // Generate memory in 1024MB (1GB) multiples
+                let memory_min = self.host_memory_range.0;
+                let memory_max = self.host_memory_range.1;
+                let memory_increments = (memory_max - memory_min) / 1024 + 1;
+                let increment_index = cluster_rng.gen_range(0..memory_increments);
+                let memory = memory_min + (increment_index * 1024);
+                
                 host.total_cores = cores;
                 host.total_memory = memory;
                 host.available_cores = cores;
@@ -206,8 +230,19 @@ impl ClusterSchedulerEnv {
         } else {
             // Use random host generation for training diversity
             for host in &mut self.hosts {
-                let cores = self.rng.gen_range(self.host_cores_range.0..=self.host_cores_range.1);
-                let memory = self.rng.gen_range(self.host_memory_range.0..=self.host_memory_range.1);
+                // Generate even number of cores
+                let mut cores = self.rng.gen_range(self.host_cores_range.0..=self.host_cores_range.1);
+                if cores % 2 == 1 {
+                    cores = (cores + 1).min(self.host_cores_range.1);
+                }
+                
+                // Generate memory in 1024MB (1GB) multiples
+                let memory_min = self.host_memory_range.0;
+                let memory_max = self.host_memory_range.1;
+                let memory_increments = (memory_max - memory_min) / 1024 + 1;
+                let increment_index = self.rng.gen_range(0..memory_increments);
+                let memory = memory_min + (increment_index * 1024);
+                
                 host.total_cores = cores;
                 host.total_memory = memory;
                 host.available_cores = cores;
