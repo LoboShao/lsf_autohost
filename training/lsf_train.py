@@ -69,7 +69,7 @@ def parse_args():
     parser.add_argument('--exploration-noise-decay', type=float, default=0.998, help='Exploration noise decay factor - slower decay')
     parser.add_argument('--min-exploration-noise', type=float, default=0.01, help='Minimum exploration noise')
     parser.add_argument('--num-envs', type=int, default=2, help='Number of parallel environments - more for better sampling')
-    parser.add_argument('--tensorboard-dir', type=str, default="config-save", help='TensorBoard log directory (auto-generated if not specified)')
+    parser.add_argument('--tensorboard-dir', type=str, default="util-balance", help='TensorBoard log directory (auto-generated if not specified)')
     
     return parser.parse_args()
 

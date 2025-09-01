@@ -133,21 +133,7 @@ impl ClusterSchedulerEnv {
         // Create hosts with realistic configurations
         let mut hosts = Vec::with_capacity(num_hosts);
         for i in 0..num_hosts {
-            // Generate even number of cores (more realistic for multi-core processors)
-            let mut cores = rng.gen_range(host_cores_range.0..=host_cores_range.1);
-            if cores % 2 == 1 {
-                cores = (cores + 1).min(host_cores_range.1);
-            }
-            
-            // Generate memory in 1024MB (1GB) multiples (more realistic for server configurations)
-            let memory_min = host_memory_range.0;
-            let memory_max = host_memory_range.1;
-            
-            // Calculate number of 1024MB (1GB) increments in the range
-            let memory_increments = (memory_max - memory_min) / 1024 + 1;
-            let increment_index = rng.gen_range(0..memory_increments);
-            let memory = memory_min + (increment_index * 1024);
-            
+            let (cores, memory) = Self::generate_realistic_host_config(host_cores_range, host_memory_range, &mut rng);
             hosts.push(Host::new(i, cores, memory));
         }
         
@@ -208,18 +194,11 @@ impl ClusterSchedulerEnv {
             // Use seed for deterministic host generation during testing
             let mut cluster_rng = StdRng::seed_from_u64(seed);
             for host in &mut self.hosts {
-                // Generate even number of cores
-                let mut cores = cluster_rng.gen_range(self.host_cores_range.0..=self.host_cores_range.1);
-                if cores % 2 == 1 {
-                    cores = (cores + 1).min(self.host_cores_range.1);
-                }
-                
-                // Generate memory in 1024MB (1GB) multiples
-                let memory_min = self.host_memory_range.0;
-                let memory_max = self.host_memory_range.1;
-                let memory_increments = (memory_max - memory_min) / 1024 + 1;
-                let increment_index = cluster_rng.gen_range(0..memory_increments);
-                let memory = memory_min + (increment_index * 1024);
+                let (cores, memory) = Self::generate_realistic_host_config(
+                    self.host_cores_range, 
+                    self.host_memory_range, 
+                    &mut cluster_rng
+                );
                 
                 host.total_cores = cores;
                 host.total_memory = memory;
@@ -230,18 +209,11 @@ impl ClusterSchedulerEnv {
         } else {
             // Use random host generation for training diversity
             for host in &mut self.hosts {
-                // Generate even number of cores
-                let mut cores = self.rng.gen_range(self.host_cores_range.0..=self.host_cores_range.1);
-                if cores % 2 == 1 {
-                    cores = (cores + 1).min(self.host_cores_range.1);
-                }
-                
-                // Generate memory in 1024MB (1GB) multiples
-                let memory_min = self.host_memory_range.0;
-                let memory_max = self.host_memory_range.1;
-                let memory_increments = (memory_max - memory_min) / 1024 + 1;
-                let increment_index = self.rng.gen_range(0..memory_increments);
-                let memory = memory_min + (increment_index * 1024);
+                let (cores, memory) = Self::generate_realistic_host_config(
+                    self.host_cores_range, 
+                    self.host_memory_range, 
+                    &mut self.rng
+                );
                 
                 host.total_cores = cores;
                 host.total_memory = memory;
@@ -588,7 +560,6 @@ impl ClusterSchedulerEnv {
         let mut job_duration_schedule = Vec::new();
         
         let cores_dist = Uniform::from(job_cores_range.0..=job_cores_range.1);
-        let memory_dist = Uniform::from(job_memory_range.0..=job_memory_range.1);
         let duration_dist = Uniform::from(job_duration_range.0..=job_duration_range.1);
         
         // Generate job arrival schedule for each timestep
@@ -599,13 +570,99 @@ impl ClusterSchedulerEnv {
             // Generate properties for jobs arriving at this timestep
             for _job in 0..num_jobs {
                 job_cores_schedule.push(cores_dist.sample(rng));
-                job_memory_schedule.push(memory_dist.sample(rng));
+                job_memory_schedule.push(Self::generate_realistic_job_memory(job_memory_range, rng));
                 job_duration_schedule.push(duration_dist.sample(rng));
             }
         }
         let total_jobs_in_pool = job_cores_schedule.len();
         
         (job_arrival_schedule, job_cores_schedule, job_memory_schedule, job_duration_schedule, total_jobs_in_pool)
+    }
+    
+    fn generate_realistic_host_config(
+        cores_range: (u32, u32), 
+        memory_range: (u32, u32), 
+        rng: &mut StdRng
+    ) -> (u32, u32) {
+        // Common core configurations for EDA clusters
+        const COMMON_CORES: &[u32] = &[8, 16, 20, 24, 28, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120, 128];
+        
+        // Common memory configurations (in MB - matching env units)
+        const COMMON_MEMORY_MB: &[u32] = &[
+            32 * 1024,   // 32GB
+            48 * 1024,   // 48GB  
+            64 * 1024,   // 64GB
+            96 * 1024,   // 96GB
+            128 * 1024,  // 128GB
+            192 * 1024,  // 192GB
+            256 * 1024,  // 256GB
+            384 * 1024,  // 384GB
+            512 * 1024,  // 512GB
+            768 * 1024,  // 768GB
+            1024 * 1024, // 1024GB
+        ];
+        
+        // Filter cores within range
+        let valid_cores: Vec<u32> = COMMON_CORES
+            .iter()
+            .filter(|&&c| c >= cores_range.0 && c <= cores_range.1)
+            .cloned()
+            .collect();
+        
+        // Filter memory within range (memory_range already in MB)
+        let valid_memory_mb: Vec<u32> = COMMON_MEMORY_MB
+            .iter()
+            .filter(|&&m| m >= memory_range.0 && m <= memory_range.1)
+            .cloned()
+            .collect();
+        
+        // Pick random valid configuration
+        let cores = if valid_cores.is_empty() {
+            // Fallback if no common cores in range
+            cores_range.0 + (cores_range.1 - cores_range.0) / 2
+        } else {
+            valid_cores[rng.gen_range(0..valid_cores.len())]
+        };
+        
+        let memory_mb = if valid_memory_mb.is_empty() {
+            // Fallback if no common memory in range  
+            memory_range.0 + (memory_range.1 - memory_range.0) / 2
+        } else {
+            valid_memory_mb[rng.gen_range(0..valid_memory_mb.len())]
+        };
+        
+        (cores, memory_mb)
+    }
+    
+    fn generate_realistic_job_memory(memory_range: (u32, u32), rng: &mut StdRng) -> u32 {
+        // Common job memory configurations for EDA workloads (in MB)
+        const COMMON_JOB_MEMORY_MB: &[u32] = &[
+            512,      // 512MB - small jobs (lint, quick synthesis)
+            768,      // 768MB - small-medium jobs
+            1024,     // 1GB - medium jobs (block-level P&R)
+            1536,     // 1.5GB - medium-large jobs
+            2048,     // 2GB - large jobs (medium synthesis)
+            3072,     // 3GB - large jobs (full-chip P&R)
+            4096,     // 4GB - large simulations
+            6144,     // 6GB - very large jobs
+            8192,     // 8GB - huge jobs
+            12288,    // 12GB - massive jobs
+            16384,    // 16GB - maximum typical EDA job
+        ];
+        
+        // Filter memory within range
+        let valid_memory: Vec<u32> = COMMON_JOB_MEMORY_MB
+            .iter()
+            .filter(|&&m| m >= memory_range.0 && m <= memory_range.1)
+            .cloned()
+            .collect();
+        
+        if valid_memory.is_empty() {
+            // Fallback if no common memory in range
+            memory_range.0 + (memory_range.1 - memory_range.0) / 2
+        } else {
+            valid_memory[rng.gen_range(0..valid_memory.len())]
+        }
     }
     
     fn simulate_job_submissions(&mut self) {
