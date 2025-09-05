@@ -99,18 +99,42 @@ class MetricsReporter:
         avg_value_loss = np.mean(update_metrics['value_loss'])
         avg_entropy_loss = np.mean(update_metrics['entropy_loss'])
         avg_approx_kl = np.mean(update_metrics['approx_kl'])
-
-        print(f"Update {update_count:4d} | Timesteps {timesteps_collected:7d} | FPS {fps:6.0f} | Reward {avg_reward:7.3f} | Loss {avg_total_loss:7.4f}")
+        
+        # Enhanced console output with more meaningful metrics
+        if 'episode_returns' in rollout_metrics and rollout_metrics['episode_returns']:
+            avg_episode_return = np.mean(rollout_metrics['episode_returns'])
+            num_episodes = len(rollout_metrics['episode_returns'])
+            max_episode_return = np.max(rollout_metrics['episode_returns'])
+            print(f"Update {update_count:4d} | Timesteps {timesteps_collected:7d} | FPS {fps:6.0f} | Episodes {num_episodes:2d} | EpReturn {avg_episode_return:7.1f} (max: {max_episode_return:7.1f})")
+        else:
+            # Show cumulative reward (now meaningful with utilization rewards)
+            total_reward = sum(rollout_metrics['rewards'])
+            avg_reward = np.mean(rollout_metrics['rewards'])
+            print(f"Update {update_count:4d} | Timesteps {timesteps_collected:7d} | FPS {fps:6.0f} | TotalReward {total_reward:7.1f} | AvgReward {avg_reward:6.3f}")
 
         self.writer.add_scalar('Training/Total_Loss', avg_total_loss, update_count)
         self.writer.add_scalar('Training/Policy_Loss', avg_policy_loss, update_count)
         self.writer.add_scalar('Training/Value_Loss', avg_value_loss, update_count)
         self.writer.add_scalar('Training/Entropy_Loss', avg_entropy_loss, update_count)
         self.writer.add_scalar('Training/Approx_KL', avg_approx_kl, update_count)
-        self.writer.add_scalar('Performance/Reward', avg_reward, update_count)
+        self.writer.add_scalar('Performance/Reward_Per_Step', avg_reward, update_count)
         self.writer.add_scalar('Performance/Value', avg_value, update_count)
         self.writer.add_scalar('Performance/Entropy', avg_entropy, update_count)
         self.writer.add_scalar('Performance/FPS', fps, update_count)
+        
+        # Log episode returns if available
+        if 'episode_returns' in rollout_metrics and rollout_metrics['episode_returns']:
+            avg_episode_return = np.mean(rollout_metrics['episode_returns'])
+            max_episode_return = np.max(rollout_metrics['episode_returns'])
+            min_episode_return = np.min(rollout_metrics['episode_returns'])
+            self.writer.add_scalar('Performance/Episode_Return_Avg', avg_episode_return, update_count)
+            self.writer.add_scalar('Performance/Episode_Return_Max', max_episode_return, update_count)
+            self.writer.add_scalar('Performance/Episode_Return_Min', min_episode_return, update_count)
+            self.writer.add_scalar('Performance/Episodes_Completed', len(rollout_metrics['episode_returns']), update_count)
+            
+            if 'episode_lengths' in rollout_metrics:
+                avg_episode_length = np.mean(rollout_metrics['episode_lengths'])
+                self.writer.add_scalar('Performance/Episode_Length_Avg', avg_episode_length, update_count)
 
         self.training_metrics['update_count'].append(update_count)
         self.training_metrics['timesteps'].append(timesteps_collected)
@@ -169,11 +193,12 @@ class FirstAvailableBaseline:
 
 class PPOTrainer:
 
-    def test_with_metrics(self, num_episodes: int = 5, update_count: int = 0, 
+    @torch.inference_mode()
+    def test_with_metrics(self, num_episodes: int = 1, update_count: int = 0, 
                          test_seeds: List[int] = None, policy_name: str = "PPO") -> Dict:
         """Test policy and collect environment metrics"""
         if test_seeds is None:
-            test_seeds = [42, 43, 44]
+            test_seeds = [42]
         
         # Save test environment data on first test run
         if self.first_test_run:
@@ -195,17 +220,23 @@ class PPOTrainer:
             obs, _ = test_env.reset()
             terminated = False
             truncated = False
+            episode_return = 0.0
+            episode_length = 0
             
             while not (terminated or truncated):
                 obs_tensor = torch.tensor(obs, dtype=torch.float32, device=self.device)
-                with torch.no_grad():
-                    action, _, _, _ = self.policy.get_action_and_value(obs_tensor, deterministic=True)
+                action, _, _, _ = self.policy.get_action_and_value(obs_tensor, deterministic=True)
                 obs, reward, terminated, truncated, _ = test_env.step(action.cpu().numpy())
+                episode_return += reward
+                episode_length += 1
                 
             # Collect environment metrics
             if hasattr(test_env, 'get_metrics'):
                 metrics = test_env.get_metrics()
                 if isinstance(metrics, dict):
+                    # Add episode return to metrics
+                    metrics['episode_return'] = episode_return
+                    metrics['episode_length'] = episode_length
                     episode_metrics.append(metrics)
             
             test_env.close()
@@ -223,11 +254,12 @@ class PPOTrainer:
         self.policy.train()
         return avg_metrics
 
-    def test_baseline_with_metrics(self, num_episodes: int = 3, update_count: int = 0, 
+    @torch.inference_mode()
+    def test_baseline_with_metrics(self, num_episodes: int = 1, update_count: int = 0, 
                                   test_seeds: List[int] = None) -> Dict:
         """Test baseline policy and collect environment metrics"""
         if test_seeds is None:
-            test_seeds = [42, 43, 44]
+            test_seeds = [42]
             
         if self.is_vectorized:
             train_env = self.env.envs[0]
@@ -245,16 +277,23 @@ class PPOTrainer:
             obs, _ = test_env.reset()
             terminated = False
             truncated = False
+            episode_return = 0.0
+            episode_length = 0
             
             while not (terminated or truncated):
                 obs_tensor = torch.tensor(obs, dtype=torch.float32, device=self.device)
                 action, _, _, _ = baseline.get_action_and_value(obs_tensor)
                 obs, reward, terminated, truncated, _ = test_env.step(action.cpu().numpy())
+                episode_return += reward
+                episode_length += 1
                 
             # Collect environment metrics
             if hasattr(test_env, 'get_metrics'):
                 metrics = test_env.get_metrics()
                 if isinstance(metrics, dict):
+                    # Add episode return to metrics
+                    metrics['episode_return'] = episode_return
+                    metrics['episode_length'] = episode_length
                     episode_metrics.append(metrics)
             
             test_env.close()
@@ -273,41 +312,53 @@ class PPOTrainer:
 
     def log_metric_comparison(self, ppo_metrics: Dict, baseline_metrics: Dict, update_count: int):
         """Log comparison between PPO and baseline performance metrics"""
-        print(f"\n=== Performance Comparison (Update {update_count}) ===")
+        # Episode return comparison
+        ppo_return = ppo_metrics['episode_return']
+        baseline_return = baseline_metrics['episode_return']
+        self.ppo_writer.add_scalar('Comparison/Episode_Return', ppo_return, update_count)
+        self.baseline_writer.add_scalar('Comparison/Episode_Return', baseline_return, update_count)
         
-        # Define key metrics to compare
-        key_metrics = [
-            'total_jobs_completed',
-            'completion_rate', 
-            'avg_host_core_utilization',
-            'avg_host_memory_utilization',
-            'jobs_in_progress',
-            'avg_waiting_time',
-            'makespan'
-        ]
+        # Log improvement percentage
+        if baseline_return != 0:
+            improvement = ((ppo_return - baseline_return) / abs(baseline_return)) * 100
+            self.writer.add_scalar('Improvement/Episode_Return_Percent', improvement, update_count)
         
-        for metric in key_metrics:
-            if metric in ppo_metrics and metric in baseline_metrics:
-                ppo_val = ppo_metrics[metric]
-                baseline_val = baseline_metrics[metric]
-                
-                if baseline_val != 0:
-                    improvement = ((ppo_val - baseline_val) / abs(baseline_val)) * 100
-                    print(f"  {metric}: PPO {ppo_val:.3f} vs Baseline {baseline_val:.3f} ({improvement:+.1f}%)")
-                else:
-                    print(f"  {metric}: PPO {ppo_val:.3f} vs Baseline {baseline_val:.3f}")
-                
-                # Log to separate writers with common section prefix
-                if self.ppo_writer and self.baseline_writer:
-                    self.ppo_writer.add_scalar(f'Comparison/{metric}', ppo_val, update_count)
-                    self.baseline_writer.add_scalar(f'Comparison/{metric}', baseline_val, update_count)
-                    
-                    # Also log improvement percentage to main writer
-                    if baseline_val != 0:
-                        improvement = ((ppo_val - baseline_val) / abs(baseline_val)) * 100
-                        self.writer.add_scalar(f'Improvement/{metric}_percent', improvement, update_count)
+        # Makespan comparison (MOST IMPORTANT for minimizing makespan)
+        ppo_makespan = ppo_metrics['makespan']
+        baseline_makespan = baseline_metrics['makespan']
+        self.ppo_writer.add_scalar('Comparison/Makespan', ppo_makespan, update_count)
+        self.baseline_writer.add_scalar('Comparison/Makespan', baseline_makespan, update_count)
         
-        print()
+        # Makespan improvement (lower is better)
+        if baseline_makespan > 0:
+            makespan_improvement = ((baseline_makespan - ppo_makespan) / baseline_makespan) * 100
+            self.writer.add_scalar('Improvement/Makespan_Reduction_Percent', makespan_improvement, update_count)
+            print(f"  Makespan - PPO: {ppo_makespan:.0f}, Baseline: {baseline_makespan:.0f}, Improvement: {makespan_improvement:.1f}%")
+        
+        # Host core utilization comparison
+        ppo_core_util = ppo_metrics['avg_host_core_utilization']
+        baseline_core_util = baseline_metrics['avg_host_core_utilization']
+        self.ppo_writer.add_scalar('Comparison/Host_Core_Utilization', ppo_core_util, update_count)
+        self.baseline_writer.add_scalar('Comparison/Host_Core_Utilization', baseline_core_util, update_count)
+        
+        # Host memory utilization comparison
+        ppo_mem_util = ppo_metrics['avg_host_memory_utilization']
+        baseline_mem_util = baseline_metrics['avg_host_memory_utilization']
+        self.ppo_writer.add_scalar('Comparison/Host_Memory_Utilization', ppo_mem_util, update_count)
+        self.baseline_writer.add_scalar('Comparison/Host_Memory_Utilization', baseline_mem_util, update_count)
+        
+        
+        # Average waiting time comparison
+        ppo_wait = ppo_metrics['avg_waiting_time']
+        baseline_wait = baseline_metrics['avg_waiting_time']
+        self.ppo_writer.add_scalar('Comparison/Avg_Waiting_Time', ppo_wait, update_count)
+        self.baseline_writer.add_scalar('Comparison/Avg_Waiting_Time', baseline_wait, update_count)
+        
+        # Average reward per step
+        ppo_avg_reward = ppo_metrics['episode_return'] / max(ppo_metrics['episode_length'], 1)
+        baseline_avg_reward = baseline_metrics['episode_return'] / max(baseline_metrics['episode_length'], 1)
+        self.ppo_writer.add_scalar('Comparison/Avg_Reward_Per_Step', ppo_avg_reward, update_count)
+        self.baseline_writer.add_scalar('Comparison/Avg_Reward_Per_Step', baseline_avg_reward, update_count)
 
     def __init__(
         self,
@@ -347,9 +398,14 @@ class PPOTrainer:
         self.minibatch_size = minibatch_size
         self.clip_value_loss = clip_value_loss
         
-        # Device setup
+        # Device setup - optimized for M3 Max
         if device == "auto":
-            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            if torch.cuda.is_available():
+                self.device = torch.device("cuda")
+            elif torch.backends.mps.is_available() and torch.backends.mps.is_built():
+                self.device = torch.device("mps")
+            else:
+                self.device = torch.device("cpu")
         else:
             self.device = torch.device(device)
         
@@ -416,7 +472,7 @@ class PPOTrainer:
     def save_test_env_data(self, test_seeds: List[int] = None):
         """Save the exact test environment data used during testing"""
         if test_seeds is None:
-            test_seeds = [42, 43, 44]
+            test_seeds = [42]
         
         if self.is_vectorized:
             train_env = self.env.envs[0]
@@ -447,9 +503,8 @@ class PPOTrainer:
             
             test_env.close()
         
-        # Save to log directory
-        log_dir = os.path.dirname(self.writer.log_dir)
-        output_file = os.path.join(log_dir, "test_env_data.json")
+        # Save to experiment log directory (same as TensorBoard logs)
+        output_file = os.path.join(self.writer.log_dir, "test_env_data.json")
         
         with open(output_file, 'w') as f:
             json.dump(test_data, f, indent=2)
@@ -479,6 +534,10 @@ class PPOTrainer:
         rollout_metrics = defaultdict(list)
         episode_ended = False
         
+        # Episode tracking
+        current_episode_return = 0.0
+        current_episode_length = 0
+        
         for step in range(num_steps):
             obs_tensor = torch.tensor(obs, dtype=torch.float32, device=self.device)
             
@@ -489,24 +548,36 @@ class PPOTrainer:
             next_obs, reward, terminated, truncated, info = self.env.step(action.cpu().numpy())
             done = terminated or truncated
             
-            
             # Store in buffer
             self.buffer.store(obs, action.cpu().numpy(), reward, value.cpu().item(), 
                             log_prob.cpu().item(), done)
             
-            # Metrics
+            # Metrics - batch CPU conversion at the end instead
             rollout_metrics['rewards'].append(reward)
             rollout_metrics['values'].append(value.cpu().item())
             rollout_metrics['entropies'].append(entropy.cpu().item())
             
+            # Track episode return
+            current_episode_return += reward
+            current_episode_length += 1
+            
             obs = next_obs
             
             if done:
+                # Record episode return (sum of rewards)
+                rollout_metrics['episode_returns'].append(current_episode_return)
+                rollout_metrics['episode_lengths'].append(current_episode_length)
+                
                 if hasattr(self.env, 'get_metrics'):
                     env_metrics = self.env.get_metrics()
                     for key, val in env_metrics.items():
                         if isinstance(val, (int, float)):
                             rollout_metrics[f'env_{key}'].append(val)
+                
+                # Reset episode tracking
+                current_episode_return = 0.0
+                current_episode_length = 0
+                
                 # Use random seed for next training episode
                 self.env.set_random_seed(None)
                 obs, _ = self.env.reset()
@@ -534,6 +605,10 @@ class PPOTrainer:
         obs, _ = self.env.reset()  # Shape: (num_envs, obs_dim)
         rollout_metrics = defaultdict(list)
         
+        # Episode tracking for each environment
+        episode_returns = [0.0] * self.num_envs
+        episode_lengths = [0] * self.num_envs
+        
         for step in range(num_steps):
             # Batch process all environments
             obs_batch = torch.tensor(obs, dtype=torch.float32, device=self.device)
@@ -542,27 +617,36 @@ class PPOTrainer:
                 # Batch process all environments at once
                 batch_actions, batch_log_probs, batch_entropies, batch_values = self.policy.get_action_and_value(obs_batch)
                 
-                # Convert to lists for env.step() and storage
-                actions = batch_actions.cpu().numpy()
-                log_probs = batch_log_probs.cpu().numpy()
-                entropies = batch_entropies.cpu().numpy()
-                values = batch_values.cpu().numpy()
+                # Only convert actions for env.step()
+                actions_np = batch_actions.cpu().numpy()
             
             # Step all environments together
-            next_obs, rewards, terminated, truncated, infos = self.env.step(actions)
+            next_obs, rewards, terminated, truncated, infos = self.env.step(actions_np)
             for env_idx in range(self.num_envs):
                 env_obs = obs[env_idx]
-                env_action = actions[env_idx]
+                env_action = actions_np[env_idx]
                 env_reward = rewards[env_idx]
                 env_done = terminated[env_idx] or truncated[env_idx]
                 
                 # Store in environment-specific buffer
-                self.buffers[env_idx].store(env_obs, env_action, env_reward, values[env_idx], 
-                                          log_probs[env_idx], bool(env_done))
+                self.buffers[env_idx].store(env_obs, env_action, env_reward, 
+                                          batch_values[env_idx].cpu().item(), 
+                                          batch_log_probs[env_idx].cpu().item(), bool(env_done))
                 
                 rollout_metrics['rewards'].append(env_reward)
-                rollout_metrics['values'].append(values[env_idx])
-                rollout_metrics['entropies'].append(entropies[env_idx])
+                rollout_metrics['values'].append(batch_values[env_idx].cpu().item())
+                rollout_metrics['entropies'].append(batch_entropies[env_idx].cpu().item())
+                
+                # Track episode return
+                episode_returns[env_idx] += env_reward
+                episode_lengths[env_idx] += 1
+                
+                # Episode ended for this environment
+                if env_done:
+                    rollout_metrics['episode_returns'].append(episode_returns[env_idx])
+                    rollout_metrics['episode_lengths'].append(episode_lengths[env_idx])
+                    episode_returns[env_idx] = 0.0
+                    episode_lengths[env_idx] = 0
             
             obs = next_obs
         
@@ -858,8 +942,8 @@ class PPOTrainer:
             
             # Run test episodes at specified intervals
             if self.metrics_reporter.should_run_test(update_count):
-                ppo_metrics = self.test_with_metrics(num_episodes=3, update_count=update_count, policy_name="PPO")
-                baseline_metrics = self.test_baseline_with_metrics(num_episodes=3, update_count=update_count)
+                ppo_metrics = self.test_with_metrics(num_episodes=1, update_count=update_count, policy_name="PPO", test_seeds=[42])
+                baseline_metrics = self.test_baseline_with_metrics(num_episodes=1, update_count=update_count, test_seeds=[42])
 
                 # Compare performance metrics
                 self.log_metric_comparison(ppo_metrics, baseline_metrics, update_count)

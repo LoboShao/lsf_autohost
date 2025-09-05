@@ -30,7 +30,7 @@ class LsfEnvWrapper(gym.Env):
         )
         
         # Define observation space - simplified to match training setup
-        state_size = self.num_hosts * 2 + 2
+        state_size = self.num_hosts * 4 + 2
         self.observation_space = spaces.Box(
             low=0.0,
             high=1.0,

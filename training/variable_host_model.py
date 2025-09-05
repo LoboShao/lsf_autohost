@@ -14,28 +14,26 @@ class VariableHostPolicy(nn.Module):
         self.action_dim = action_dim
         self.num_hosts = num_hosts
         
-        # Optimized hidden size - balance between speed and attention effectiveness
-        self.hidden_size = 32  # Reduced from 128, still good for attention
+        self.hidden_size = 16
         
         # Exploration noise scheduling
         self.exploration_noise_decay = exploration_noise_decay
         self.min_exploration_noise = min_exploration_noise
         self.current_exploration_noise = 1.0
         
-        # Lightweight host encoder: single layer
-        self.host_encoder = nn.Linear(2, self.hidden_size)
+        self.host_encoder = nn.Linear(4, self.hidden_size)
         
-        # Lightweight job encoder: single layer
         self.job_encoder = nn.Linear(2, self.hidden_size)
         
-        # Lightweight attention: fewer heads for speed
         self.attention = nn.MultiheadAttention(self.hidden_size, num_heads=4, batch_first=True)
         
-        # Lightweight priority head: direct mapping
         self.priority_head = nn.Linear(self.hidden_size, 1)
         
-        # Lightweight value head
-        self.value_head = nn.Linear(self.hidden_size, 1)
+        self.value_head = nn.Sequential(
+            nn.Linear(self.hidden_size, 64),
+            nn.ReLU(),
+            nn.Linear(64, 1)
+        )
         
         # Action standard deviation parameter
         self.policy_log_std = nn.Parameter(torch.zeros(action_dim) - 1.0)
@@ -53,10 +51,10 @@ class VariableHostPolicy(nn.Module):
             obs = obs.unsqueeze(0)
         
         batch_size = obs.shape[0]
-        num_hosts = (obs.shape[1] - 2) // 2
+        num_hosts = (obs.shape[1] - 2) // 4
         
-        # Parse observation: [host1_core, host1_mem, ..., hostN_core, hostN_mem, job_core, job_mem]
-        host_features = obs[:, :num_hosts * 2].view(batch_size, num_hosts, 2)  # [batch, num_hosts, 2]
+        # Parse observation: [host1_core_util, host1_mem_util, host1_cores_norm, host1_mem_norm, ..., job_core, job_mem]
+        host_features = obs[:, :num_hosts * 4].view(batch_size, num_hosts, 4)  # [batch, num_hosts, 4]
         job_features = obs[:, -2:]  # [batch, 2]
         
         # Encode features with activation
