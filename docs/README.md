@@ -26,38 +26,36 @@ src/
     └── vectorized_gym_wrapper.py  # Multi-environment support
 ```
 
-### State Representation
+### Rust Environment Core
 
-The environment provides a normalized state vector optimized for neural network training:
+The simulation environment is implemented in Rust for high performance and exposes Python bindings via PyO3:
 
-**State Size**: `num_hosts * 4 + 2`
+**Key Characteristics**:
+- **Integer time model**: Time advances in whole seconds, multiple jobs can arrive per second
+- **Event-driven simulation**: Job arrivals, completions, and resource updates processed efficiently
+- **Memory consistency**: All memory values in MB throughout codebase (64GB = 65536MB)
+- **Deterministic execution**: Pre-generated job schedules for reproducible evaluation
 
-**Per-Host Features (4 per host)**:
-- `host_core_util`: Current CPU utilization (0-1)
-- `host_mem_util`: Current memory utilization (0-1)
-- `host_cores_norm`: Host cores / environment max cores (normalized capacity)
-- `host_mem_norm`: Host memory / environment max memory (normalized capacity)
+**Job Flow**:
+```
+New Jobs → Job Queue → Submission Queue → Agent Decision → Host Assignment
+              ↑                                            ↓
+         Deferred Jobs ← ← ← ← ← ← ← ← ← ← ← (if insufficient resources)
+```
 
-**Global Job Features (2 total)**:
-- `job_core_norm`: Current job cores / max job cores
-- `job_mem_norm`: Current job memory / max job memory
+**State Representation** (size: `num_hosts * 4 + 2`):
+- Per-host features: CPU utilization, memory utilization, normalized cores, normalized memory
+- Global job features: normalized core/memory requirements for current job
 
-**Performance Optimizations**:
-- Host capacity ratios are pre-calculated and cached in the Host struct
-- Eliminates 60 runtime divisions per state query, replaced with cached field accesses
-- Critical for training performance at scale
+**Action Interface**:
+The agent receives host priority vectors as input and must select which host to assign the current job. Invalid assignments (insufficient resources) are automatically handled.
 
-### Action Space
-
-The policy network outputs a single integer representing the target host ID for the current job. Invalid actions (insufficient resources) are masked during training and evaluation.
-
-### Reward Function
-
-The reward structure balances multiple scheduling objectives:
-- Job completion rewards
-- Resource utilization efficiency
-- Queue wait time penalties
-- Load balancing incentives
+**Core Environment Methods**:
+- `reset()`: Initialize cluster state and job schedules
+- `step(action)`: Process scheduling decision and advance simulation
+- `needs_decision()`: Check if agent input required
+- `get_state()`: Return current normalized state vector
+- `get_metrics()`: Extract performance statistics
 
 ## Installation
 
@@ -157,61 +155,48 @@ python src/training/lsf_train.py \
 
 ## Implementation Details
 
-### Neural Network Architecture
+### Environment Implementation
 
-The `VariableHostPolicy` implements a specialized architecture for heterogeneous cluster scheduling:
+**Resource Management**:
+```python
+# Host configuration with realistic EDA cluster values
+host_cores_range = (16, 32)        # CPU cores per host
+host_memory_range = (64*1024, 128*1024)  # Memory in MB (64GB-128GB)
 
-**Host Encoder**:
-- Processes 4 features per host through a shared MLP
-- Outputs host embeddings capturing resource state and capacity
-- Handles variable numbers of hosts dynamically
+# Job characteristics matching EDA workloads
+job_cores_range = (1, 4)           # Typical EDA job core requirements
+job_memory_range = (512, 4*1024)   # 512MB-4GB memory requirements
+```
 
-**Job Encoder**:
-- Processes global job features (2 features)
-- Provides context about current scheduling decision
+**Time and Job Management**:
+- Jobs arrive in bursts up to `max_jobs_per_step` per second
+- Agent makes scheduling decisions for each job in submission queue
+- Deferred jobs (insufficient resources) retry in subsequent steps
+- Episode ends when all generated jobs complete or time limit reached
 
-**Policy Head**:
-- Combines host and job representations
-- Outputs action probabilities over available hosts
-- Includes exploration noise with decay schedule
+**Performance Optimizations**:
+- Pre-calculated host normalization factors (cores/max_cores, memory/max_memory)
+- Cached state vector construction eliminates repeated calculations
+- Efficient event-driven time advancement
 
-**Value Head**:
-- Estimates state values for advantage computation
-- Shares representations with policy head
+### Key Environment Parameters
 
-### Environment Simulation
+| Parameter | Typical Value | Description |
+|-----------|---------------|-------------|
+| `num_hosts` | 50-100 | Cluster size |
+| `max_jobs_per_step` | 30-80 | Job arrival rate (scheduling pressure) |
+| `max_time` | 150-300 | Episode length in seconds |
+| `host_cores_range` | (16, 32) | CPU diversity |
+| `host_memory_range` | (64GB, 128GB) | Memory diversity |
 
-The Rust environment implements a discrete-event simulation with:
+### Training Algorithm Features
 
-**Job Generation**:
-- Realistic EDA workload patterns
-- Configurable resource requirements
-- Deterministic schedules for reproducible evaluation
-
-**Host Modeling**:
-- Heterogeneous resource configurations
-- Realistic core/memory combinations
-- Efficient resource tracking
-
-**Event Processing**:
-- Job arrivals, completions, and resource updates
-- Optimized for high-frequency state queries during training
-
-### Training Algorithm
-
-PPO implementation with modern enhancements:
-
-**Generalized Advantage Estimation (GAE)**:
-- Reduces variance in advantage estimates
-- Configurable lambda parameter for bias-variance tradeoff
-
-**Value Function Normalization**:
-- Running mean/variance normalization
-- Improves training stability with sparse rewards
-
-**Gradient Clipping**:
-- Prevents training instability
-- Automatic scaling based on gradient norms
+**PPO Enhancements**:
+- Generalized Advantage Estimation (GAE) for variance reduction
+- Value function normalization for training stability
+- Learning rate scheduling (cosine annealing, warmup)
+- Early stopping with patience-based convergence detection
+- Exploration noise decay for improved exploitation over time
 
 ## Evaluation and Testing
 
