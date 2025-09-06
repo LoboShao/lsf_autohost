@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 import sys
 import os
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 
 import torch
 import argparse
 import numpy as np
-from wrapper.gym_wrapper import make_lsf_env
-from training.variable_host_model import VariableHostPolicy
-from training.ppo import PPOTrainer
+from src.wrapper.gym_wrapper import make_lsf_env
+from src.training.variable_host_model import VariableHostPolicy
+from src.training.ppo import PPOTrainer
 
 
 def parse_args():
@@ -63,7 +63,7 @@ def parse_args():
     parser.add_argument('--early-stopping-patience', type=int, default=200, help='Early stopping patience - reasonable for longer training')
     parser.add_argument('--early-stopping-threshold', type=float, default=0.01, help='Early stopping improvement threshold')
     parser.add_argument('--value-norm-decay', type=float, default=0.99, help='Value normalization decay factor')
-    parser.add_argument('--log-dir', type=str, default="exp4", help='Log directory for TensorBoard logs, checkpoints, and test data')
+    parser.add_argument('--log-dir', type=str, default="exp5", help='Log directory for TensorBoard logs, checkpoints, and test data')
     parser.add_argument('--save-freq', type=int, default=250, help='Checkpoint save frequency - more frequent for experiments')
     parser.add_argument('--resume-from', type=str, default=None, help='Resume training from checkpoint')
     parser.add_argument('--exploration-noise-decay', type=float, default=0.998, help='Exploration noise decay factor - slower decay')
@@ -104,13 +104,16 @@ def main():
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
     
+    # Get project root directory (two levels up from src/training/)
+    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '../..'))
+    
     if args.log_dir is None:
         from datetime import datetime
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        log_dir = f"logs/ppo_training_{timestamp}"
+        log_dir = os.path.join(project_root, "logs", f"ppo_training_{timestamp}")
     else:
-        # Ensure log_dir is always under logs/
-        log_dir = f"logs/{args.log_dir}"
+        # Ensure log_dir is always under project_root/logs/
+        log_dir = os.path.join(project_root, "logs", args.log_dir)
     
     # Set up directories
     tensorboard_dir = log_dir

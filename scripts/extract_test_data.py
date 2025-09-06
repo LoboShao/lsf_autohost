@@ -9,9 +9,9 @@ import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 import json
-from wrapper.gym_wrapper import make_lsf_env
+from src.wrapper.gym_wrapper import make_lsf_env
 
-def extract_exact_test_data(training_env_config, log_dir="logs"):
+def extract_exact_test_data(training_env_config, log_dir=None):
     """Extract the exact test data that would be used during PPO testing."""
     
     # Step 1: Create the training environment (this sets up the base config)
@@ -66,7 +66,11 @@ def extract_exact_test_data(training_env_config, log_dir="logs"):
     
     train_env.close()
     
-    # Save to file
+    # Save to file - use project root logs directory if not specified
+    if log_dir is None:
+        project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+        log_dir = os.path.join(project_root, "logs")
+    
     os.makedirs(log_dir, exist_ok=True)
     output_file = os.path.join(log_dir, "exact_test_data.json")
     
