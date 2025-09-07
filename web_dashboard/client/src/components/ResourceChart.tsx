@@ -37,15 +37,13 @@ interface ChartData {
   time: number[];
   avgCpu: number[];
   avgMemory: number[];
-  activeJobs: number[];
 }
 
 const ResourceChart: React.FC<Props> = ({ episodeData, isPaused = false }) => {
   const [chartData, setChartData] = useState<ChartData>({
     time: [],
     avgCpu: [],
-    avgMemory: [],
-    activeJobs: []
+    avgMemory: []
   });
 
   useEffect(() => {
@@ -53,101 +51,99 @@ const ResourceChart: React.FC<Props> = ({ episodeData, isPaused = false }) => {
       const avgCpu = episodeData.hosts.reduce((sum, host) => sum + host.cpu_util, 0) / episodeData.hosts.length;
       const avgMemory = episodeData.hosts.reduce((sum, host) => sum + host.memory_util, 0) / episodeData.hosts.length;
       const currentTime = episodeData.env_time || episodeData.time || 0;
-      const activeJobs = episodeData.env_data?.active_jobs || episodeData.metrics?.active_jobs || 0;
       
       setChartData(prev => {
         const newTime = [...prev.time, currentTime];
         const newAvgCpu = [...prev.avgCpu, avgCpu];
         const newAvgMemory = [...prev.avgMemory, avgMemory];
-        const newActiveJobs = [...prev.activeJobs, activeJobs];
 
-        // Keep only last 200 points for better history
+        // Keep only last 200 points for better performance
         const maxPoints = 200;
         return {
           time: newTime.slice(-maxPoints),
           avgCpu: newAvgCpu.slice(-maxPoints),
-          avgMemory: newAvgMemory.slice(-maxPoints),
-          activeJobs: newActiveJobs.slice(-maxPoints)
+          avgMemory: newAvgMemory.slice(-maxPoints)
         };
       });
     }
   }, [episodeData, isPaused]);
 
   const plotData = [
+    // CPU utilization - smooth line for trend visibility
     {
       x: chartData.time,
       y: chartData.avgCpu,
       type: 'scatter' as const,
       mode: 'lines' as const,
-      name: 'Average CPU %',
-      line: { color: '#f44336', width: 2 },
-      yaxis: 'y'
+      name: 'CPU Utilization',
+      line: { 
+        color: '#2196F3', 
+        width: 3,
+        smoothing: 0.6
+      },
+      hovertemplate: '<b>CPU</b>: %{y:.1f}%<br>Time: %{x}s<extra></extra>'
     },
+    // Memory utilization - smooth line for trend visibility  
     {
       x: chartData.time,
       y: chartData.avgMemory,
       type: 'scatter' as const,
       mode: 'lines' as const,
-      name: 'Average Memory %',
-      line: { color: '#2196f3', width: 2 },
-      yaxis: 'y'
-    },
-    {
-      x: chartData.time,
-      y: chartData.activeJobs,
-      type: 'scatter' as const,
-      mode: 'lines' as const,
-      name: 'Active Jobs',
-      line: { color: '#4caf50', width: 2 },
-      yaxis: 'y2'
+      name: 'Memory Utilization',
+      line: { 
+        color: '#FF5722', 
+        width: 3,
+        smoothing: 0.6
+      },
+      hovertemplate: '<b>Memory</b>: %{y:.1f}%<br>Time: %{x}s<extra></extra>'
     }
   ];
 
   const layout = {
+    title: {
+      text: 'Resource Utilization Over Time',
+      font: { size: 14, color: '#333' },
+      x: 0.5,
+      xanchor: 'center' as const
+    },
     height: 320,
-    margin: { t: 30, r: 80, b: 80, l: 80 },
+    margin: { t: 50, r: 50, b: 80, l: 70 },
     showlegend: true,
     legend: { 
       orientation: 'h' as const, 
       x: 0.5,
       xanchor: 'center' as const,
-      y: -0.3,
-      bgcolor: 'rgba(255,255,255,0.8)',
-      bordercolor: '#e0e0e0',
-      borderwidth: 1
+      y: -0.25,
+      bgcolor: 'rgba(255,255,255,0.9)',
+      bordercolor: 'rgba(200,200,200,0.5)',
+      borderwidth: 1,
+      font: { size: 12 }
     },
     xaxis: {
       title: {
         text: 'Simulation Time (seconds)',
-        standoff: 20
+        font: { size: 12 }
       },
-      gridcolor: '#e0e0e0',
-      showgrid: true
+      gridcolor: 'rgba(200,200,200,0.3)',
+      showgrid: true,
+      zeroline: false
     },
     yaxis: {
       title: {
-        text: 'Resource Utilization (%)',
-        standoff: 30
+        text: 'Utilization (%)',
+        font: { size: 12 }
       },
-      side: 'left' as const,
       range: [0, 100],
-      gridcolor: '#e0e0e0',
-      showgrid: true
-    },
-    yaxis2: {
-      title: {
-        text: 'Active Jobs Count',
-        standoff: 30
-      },
-      side: 'right' as const,
-      overlaying: 'y' as const,
-      gridcolor: 'transparent',
-      showgrid: false
+      gridcolor: 'rgba(200,200,200,0.3)',
+      showgrid: true,
+      ticksuffix: '%',
+      dtick: 20
     },
     plot_bgcolor: '#fafafa',
     paper_bgcolor: 'white',
+    hovermode: 'x unified' as const,
     font: {
-      size: 12,
+      size: 11,
       family: 'Arial, sans-serif'
     }
   };

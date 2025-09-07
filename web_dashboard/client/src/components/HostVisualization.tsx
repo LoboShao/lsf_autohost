@@ -43,7 +43,7 @@ const HostVisualization: React.FC<Props> = ({ hosts, hostConfigs }) => {
       className="host-grid" 
       sx={{ 
         gridTemplateColumns: `repeat(${gridCols}, 1fr)`,
-        maxHeight: '450px',
+        maxHeight: '540px',
         overflowY: 'auto'
       }}
     >

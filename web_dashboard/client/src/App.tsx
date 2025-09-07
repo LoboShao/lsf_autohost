@@ -309,7 +309,7 @@ const App: React.FC = () => {
         <Grid container spacing={3}>
           {/* Cluster Host Utilizations - Full Width, Large */}
           <Grid item xs={12}>
-            <Paper elevation={3} sx={{ p: 2, height: '500px' }}>
+            <Paper elevation={3} sx={{ p: 2, height: '600px' }}>
               <Typography variant="h6" gutterBottom>
                 Cluster Host Utilizations
               </Typography>
