@@ -370,6 +370,10 @@ impl ClusterSchedulerEnv {
         info.set_item("submission_queue_length", self.submission_queue.len())?;
         info.set_item("active_jobs", self.active_jobs.len())?;
         info.set_item("needs_decision", !self.submission_queue.is_empty())?;
+        info.set_item("total_jobs_generated", self.total_jobs_generated)?;
+        info.set_item("total_jobs_completed", self.total_jobs_completed)?;
+        info.set_item("total_jobs_failed", self.total_jobs_failed)?;
+        info.set_item("current_time", self.current_time)?;
         
         let state = self.get_state(py)?;
         
@@ -510,6 +514,81 @@ impl ClusterSchedulerEnv {
         metrics.set_item("avg_host_memory_utilization", avg_memory_util)?;
         
         Ok(metrics.into())
+    }
+    
+    pub fn get_queue_states(&self, py: Python) -> PyResult<PyObject> {
+        // Expose internal queue states for visualization
+        let queue_states = PyDict::new(py);
+        
+        // Job queue info
+        queue_states.set_item("job_queue_length", self.job_queue.len())?;
+        queue_states.set_item("submission_queue_length", self.submission_queue.len())?;
+        queue_states.set_item("deferred_jobs_length", self.deferred_jobs.len())?;
+        queue_states.set_item("active_jobs_count", self.active_jobs.len())?;
+        
+        // Current time info
+        queue_states.set_item("current_time", self.current_time)?;
+        queue_states.set_item("max_time", self.max_time)?;
+        queue_states.set_item("current_step", self.current_step)?;
+        
+        // Job statistics
+        queue_states.set_item("total_jobs_generated", self.total_jobs_generated)?;
+        queue_states.set_item("total_jobs_completed", self.total_jobs_completed)?;
+        queue_states.set_item("total_jobs_failed", self.total_jobs_failed)?;
+        queue_states.set_item("jobs_completed_this_step", self.jobs_completed_this_step)?;
+        
+        // Completion heap size
+        queue_states.set_item("pending_completions", self.completion_heap.len())?;
+        
+        Ok(queue_states.to_object(py))
+    }
+    
+    pub fn get_visualization_data(&self, py: Python) -> PyResult<PyObject> {
+        // Get comprehensive data for web dashboard visualization
+        let viz_dict = pyo3::types::PyDict::new(py);
+        
+        // Time information
+        viz_dict.set_item("current_time", self.current_time)?;
+        viz_dict.set_item("max_time", self.max_time)?;
+        
+        // Job counts
+        viz_dict.set_item("total_jobs_generated", self.total_jobs_generated)?;
+        viz_dict.set_item("total_jobs_completed", self.total_jobs_completed)?;
+        viz_dict.set_item("total_jobs_failed", self.total_jobs_failed)?;
+        viz_dict.set_item("active_jobs_count", self.active_jobs.len())?;
+        
+        // Queue information
+        viz_dict.set_item("job_queue_length", self.job_queue.len())?;
+        viz_dict.set_item("submission_queue_length", self.submission_queue.len())?;
+        viz_dict.set_item("deferred_jobs_length", self.deferred_jobs.len())?;
+        
+        // Decision state
+        viz_dict.set_item("needs_decision", !self.submission_queue.is_empty())?;
+        
+        // Episode state
+        let all_jobs_generated = self.current_time >= self.max_time as u64;
+        let no_pending_work = self.job_queue.is_empty() && 
+                             self.submission_queue.is_empty() && 
+                             self.deferred_jobs.is_empty() && 
+                             self.active_jobs.is_empty();
+        let episode_done = all_jobs_generated && no_pending_work;
+        viz_dict.set_item("episode_done", episode_done)?;
+        viz_dict.set_item("all_jobs_generated", all_jobs_generated)?;
+        
+        // Host utilization data
+        let hosts_list = pyo3::types::PyList::empty(py);
+        for (i, host) in self.hosts.iter().enumerate() {
+            let host_dict = pyo3::types::PyDict::new(py);
+            host_dict.set_item("id", i)?;
+            host_dict.set_item("cpu_util", self.host_core_utils[i] * 100.0)?; // Convert to percentage
+            host_dict.set_item("memory_util", self.host_memory_utils[i] * 100.0)?; // Convert to percentage
+            host_dict.set_item("total_cores", host.total_cores)?;
+            host_dict.set_item("total_memory", host.total_memory)?;
+            hosts_list.append(host_dict)?;
+        }
+        viz_dict.set_item("hosts", hosts_list)?;
+        
+        Ok(viz_dict.to_object(py))
     }
     
 }

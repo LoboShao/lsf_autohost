@@ -92,3 +92,13 @@ logs/
 
 # Claude.md - personal assistant instructions
 **/CLAUDE.md
+
+# Web Dashboard
+web_dashboard/node_modules/
+web_dashboard/client/node_modules/
+web_dashboard/client/build/
+web_dashboard/client/dist/
+web_dashboard/server/node_modules/
+web_dashboard/*.log
+web_dashboard/client/*.log
+web_dashboard/server/*.log

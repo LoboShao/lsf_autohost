@@ -1,0 +1,28 @@
+{
+  "name": "lsf-scheduler-dashboard",
+  "version": "1.0.0",
+  "description": "Professional LSF Scheduler Visualization Dashboard",
+  "main": "server/server.js",
+  "scripts": {
+    "dev": "concurrently \"npm run server\" \"npm run client\"",
+    "server": "nodemon server/server.js",
+    "client": "cd client && npm start",
+    "build": "cd client && npm run build",
+    "start": "node server/server.js",
+    "install-all": "npm install && cd client && npm install"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "socket.io": "^4.7.2",
+    "cors": "^2.8.5",
+    "child_process": "^1.0.2",
+    "path": "^0.12.7"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1",
+    "concurrently": "^8.2.2"
+  },
+  "keywords": ["lsf", "scheduler", "visualization", "dashboard"],
+  "author": "LSF Team",
+  "license": "MIT"
+}
