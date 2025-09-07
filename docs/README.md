@@ -218,7 +218,7 @@ The system automatically generates deterministic test environment data for repro
         {"host_id": 1, "total_cores": 18, "total_memory": 81920}
       ],
       "job_schedule": {
-        "job_arrival_schedule": [2, 1, 0, 3, ...],  // Jobs per timestep
+        "job_arrival_schedule": [2, 1, 0, 3, ...],  // Jobs per SECOND (not timestep)
         "job_cores_schedule": [4, 2, 1, 8, ...],    // CPU requirements
         "job_memory_schedule": [8192, 4096, ...],   // Memory requirements (MB)
         "job_duration_schedule": [45, 30, 15, ...], // Job durations (seconds)
@@ -230,6 +230,12 @@ The system automatically generates deterministic test environment data for repro
   }
 }
 ```
+
+**Time vs Timestep Distinction**:
+- **Time** (seconds): Simulation time that advances when all jobs in current second are processed
+- **Timestep**: Individual agent decision steps - multiple timesteps can occur within one second
+- **Job Arrivals**: `job_arrival_schedule[t]` = number of jobs arriving at simulation second `t`
+- **Scheduling Process**: If 3 jobs arrive in second 5, this creates 3 timesteps for scheduling decisions before advancing to second 6
 
 **Generation Process**:
 1. **Automatic Creation**: Generated during first test run of PPO training
