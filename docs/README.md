@@ -92,29 +92,43 @@ The agent receives host priority vectors as input and must select which host to 
 python src/training/lsf_train.py --log-dir experiment_name
 ```
 
-### Key Training Parameters
+### Environment Parameters
 
-**Environment Configuration**:
+**Core Environment Settings**:
 ```bash
---num-hosts 50              # Cluster size
---episode-length 200        # Timesteps per episode
---max-jobs-per-step 50      # Job arrival rate
---host-cores-range 16 32    # CPU cores per host
---host-memory-range 65536 131072  # Memory (MB) per host
---job-cores-range 1 4       # Job CPU requirements
---job-memory-range 512 4096 # Job memory requirements (MB)
+--num-hosts 10              # Number of compute hosts in cluster
+--episode-length 500        # Episode length in time units (~20x timesteps)
+--max-jobs-per-step 30      # Maximum jobs arriving per timestep
 ```
 
-**PPO Hyperparameters**:
+**Resource Configuration**:
 ```bash
---total-timesteps 50000000  # Total training steps
---rollout-steps 12288       # Steps per policy update
---lr 3e-4                   # Learning rate
---gamma 0.995               # Discount factor
---lam 0.99                  # GAE lambda
---clip-coef 0.2             # PPO clip coefficient
---ent-coef 0.01             # Entropy coefficient
---vf-coef 2.0               # Value function coefficient
+--host-cores-range 32 32    # Host CPU capacity
+--host-memory-range 65536 65536    # Host memory in MB
+--job-cores-range 1 8       # Job CPU requirements
+--job-memory-range 4096 16384      # Job memory requirements (MB)
+--job-duration-range 10 90  # Job duration in seconds
+```
+
+### PPO Hyperparameters
+
+**Core PPO Settings**:
+```bash
+--lr 3e-4                   # Learning rate (CRITICAL PARAMETER)
+--gamma 0.995               # Discount factor for future rewards
+--lam 0.95                  # GAE lambda for advantage estimation
+--clip-coef 0.1             # PPO clipping coefficient
+--ent-coef 0.01             # Entropy coefficient for exploration
+--vf-coef 0.5               # Value function loss coefficient
+```
+
+**Training Scale Parameters**:
+```bash
+--total-timesteps 33000000  # Total training steps
+--rollout-steps 2048        # Steps per rollout collection
+--num-envs 8                # Parallel environments
+--minibatch-size 512        # Batch size for SGD updates
+--update-epochs 4           # SGD epochs per rollout
 ```
 
 ### Advanced Training Features
@@ -122,20 +136,111 @@ python src/training/lsf_train.py --log-dir experiment_name
 **Learning Rate Scheduling**:
 ```bash
 --lr-schedule cosine        # Options: constant, linear, exponential, cosine, warmup_cosine
---lr-warmup-steps 100       # Warmup steps for warmup schedules
+--lr-warmup-steps 1000      # Gradual LR increase at start (~5-10% of total updates)
+--lr-decay-factor 0.995     # For exponential decay only
 ```
 
-**Early Stopping**:
+**Training Control**:
 ```bash
---early-stopping-patience 200   # Updates to wait for improvement
---early-stopping-threshold 0.01 # Minimum improvement threshold
+--early-stopping-patience 200      # Updates to wait for improvement (10-20% of total)
+--early-stopping-threshold 0.01    # Minimum improvement threshold
+--save-freq 250                     # Save every N updates
+--resume-from path/to/checkpoint.pt # Resume training
 ```
 
-**Checkpointing**:
+**Advanced Parameters**:
 ```bash
---save-freq 250             # Save every N updates
---resume-from path/to/checkpoint.pt  # Resume training
+--value-norm-decay 0.99         # Value normalization decay
+--exploration-noise-decay 0.998 # Policy exploration noise decay
 ```
+
+### Hyperparameter Tuning Guide
+
+#### 1. Monitor Key Metrics
+- **Training reward**: Should increase over time
+- **Policy loss**: Should decrease and stabilize
+- **Value loss**: Should decrease
+- **Entropy**: Should decrease gradually
+- **Test completion rate**: Should improve
+
+#### 2. Common Issues & Fixes
+
+**Slow Learning:**
+- Increase `--lr` to 5e-4
+- Increase `--ent-coef` to 0.02
+- Check if `--rollout-steps` captures enough rewards
+
+**Unstable Training:**
+- Decrease `--lr` to 1e-4
+- Decrease `--clip-coef` to 0.05
+- Increase `--minibatch-size`
+
+**Poor Exploration:**
+- Increase `--ent-coef`
+- Slower `--exploration-noise-decay` to 0.999
+- Check action space coverage
+
+**Plateauing Performance:**
+- Use learning rate schedule with decay (`--lr-schedule cosine`)
+- Increase `--total-timesteps`
+- Check if agent has converged to local optimum
+
+#### 3. Parameter Relationships
+
+**Learning Rate (`--lr`)**:
+- Too high (>1e-3): Unstable training, loss spikes
+- Too low (<1e-4): Slow learning, plateau early
+- For batch rewards: Start with 3e-4 to 5e-4
+
+**Rollout Steps (`--rollout-steps`)**:
+- Must be long enough to capture multiple rewards
+- Should be 2-5x your typical reward interval
+- For batch reward system: 2048+ recommended
+
+**Environment Scaling**:
+- More hosts → larger action space → may need lower LR
+- Higher `--max-jobs-per-step` → more scheduling pressure → harder learning
+- Longer `--episode-length` → more rewards per episode but slower rollouts
+
+### Deterministic Testing Data
+
+The system automatically generates deterministic test environment data for reproducible evaluation during training. This data is saved to `logs/{experiment_name}/test_env_data.json` and contains:
+
+**Test Environment Seeds**: Fixed seeds (42, 43, 44) ensure consistent evaluation across experiments.
+
+**Data Structure**:
+```json
+{
+  "test_environments": {
+    "42": {
+      "hosts": [
+        {"host_id": 0, "total_cores": 24, "total_memory": 98304},
+        {"host_id": 1, "total_cores": 18, "total_memory": 81920}
+      ],
+      "job_schedule": {
+        "job_arrival_schedule": [2, 1, 0, 3, ...],  // Jobs per timestep
+        "job_cores_schedule": [4, 2, 1, 8, ...],    // CPU requirements
+        "job_memory_schedule": [8192, 4096, ...],   // Memory requirements (MB)
+        "job_duration_schedule": [45, 30, 15, ...], // Job durations (seconds)
+        "total_jobs_in_pool": 4500,
+        "max_time": 150,
+        "num_hosts": 30
+      }
+    }
+  }
+}
+```
+
+**Generation Process**:
+1. **Automatic Creation**: Generated during first test run of PPO training
+2. **Consistent Jobs**: All job requirements pre-determined for reproducibility
+3. **Host Configurations**: Fixed cluster layouts for fair comparison
+4. **Arrival Patterns**: Deterministic job arrival timing
+
+**Usage**:
+- Training automatically tests against these environments at intervals
+- Web dashboard visualizer loads this data for episode replay
+- Ensures fair comparison between different training runs and hyperparameters
 
 ### Training Example
 
@@ -260,72 +365,6 @@ The visualizer requires:
 - **Model Checkpoints**: `logs/[experiment]/checkpoints/*.pt`
 - **Dependencies**: Automatically installed by the script
 
-### Metrics
-
-**Environment Metrics**:
-- Completion rate: Jobs successfully scheduled and completed
-- Makespan: Total episode completion time
-- Resource utilization: Average CPU/memory usage
-- Queue wait time: Average job queueing delay
-- Load imbalance: Variance in host utilization
-
-**Training Metrics**:
-- Policy loss: PPO clipped objective
-- Value loss: Critic MSE
-- Entropy: Policy exploration measure
-- Gradient norm: Training stability indicator
-
-## Model Deployment
-
-### Checkpoint Format
-
-Trained models are saved as PyTorch state dictionaries containing:
-- Policy network parameters
-- Value network parameters
-- Normalization statistics
-- Training metadata
-
-### LSF Integration
-
-The trained models are designed for deployment through IBM LSF external scheduling plugins:
-
-1. **Model Loading**: Load trained PyTorch model in plugin environment
-2. **State Extraction**: Convert LSF cluster state to model input format
-3. **Inference**: Run forward pass to get host selection probabilities
-4. **Action Selection**: Choose host based on model output
-5. **Job Submission**: Submit job to selected host via LSF APIs
-
-### Inference Pipeline
-
-```python
-# Pseudocode for LSF plugin integration
-model = VariableHostPolicy.load(checkpoint_path)
-model.eval()
-
-# Convert LSF state to model input
-state = extract_lsf_state(lsf_cluster_info)
-normalized_state = normalize_state(state)
-
-# Get scheduling decision
-with torch.no_grad():
-    action_probs = model.get_action_probs(normalized_state)
-    selected_host = choose_action(action_probs, available_hosts)
-
-# Submit job to selected host
-lsf_submit_job(job, selected_host)
-```
-
-## Performance Characteristics
-
-### Training Performance
-- **Small clusters** (20-50 hosts): 2-4 hours on modern CPU
-- **Large clusters** (100+ hosts): 8-16 hours, GPU acceleration recommended
-- **Memory usage**: ~2-8GB depending on cluster size and rollout length
-
-### Inference Performance
-- **Latency**: <1ms per scheduling decision on modern hardware
-- **Throughput**: 1000+ decisions/second for real-time scheduling
-- **Memory footprint**: ~50-200MB depending on model size
 
 ## Configuration Files
 
