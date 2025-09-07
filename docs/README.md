@@ -22,8 +22,7 @@ src/
 │   ├── ppo.py           # PPO algorithm implementation
 │   └── variable_host_model.py  # Neural network architecture
 └── wrapper/              # Environment interfaces
-    ├── gym_wrapper.py   # Gymnasium compatibility
-    └── vectorized_gym_wrapper.py  # Multi-environment support
+    └── gym_wrapper.py   # Gymnasium compatibility
 ```
 
 ### Rust Environment Core
