@@ -198,23 +198,67 @@ job_memory_range = (512, 4*1024)   # 512MB-4GB memory requirements
 - Early stopping with patience-based convergence detection
 - Exploration noise decay for improved exploitation over time
 
-## Evaluation and Testing
+## Web Dashboard Visualizer
 
-### Deterministic Testing
+### Real-time Training Visualization
 
-The system includes comprehensive evaluation tools:
+The project includes a comprehensive web dashboard for visualizing training episodes in real-time using the interactive launcher script:
 
 ```bash
-# Extract deterministic test environments
-python scripts/extract_test_data.py
+# Navigate to web dashboard
+cd web_dashboard
 
-# Test trained model against baselines
-# (automatically done during training at specified intervals)
+# Run the interactive visualizer launcher
+./run_visualizer.sh
 ```
 
-**Test Seeds**: Fixed seeds (42, 43, 44) ensure reproducible evaluation across experiments.
+The script will automatically:
+- Detect available experiment directories with trained models
+- Present a menu to select experiment and checkpoint
+- Start both server and client with proper configuration
+- Open dashboard at http://localhost:3000
 
-**Baseline Comparison**: First-Available scheduler provides performance baseline.
+### Manual Usage
+
+```bash
+# Specify experiment and checkpoint directly
+./run_visualizer.sh logs/exp4 latest.pt
+
+# Interactive mode (recommended)
+./run_visualizer.sh
+```
+
+### Key Features
+
+**Real-time Job Queue Visualization**:
+- Job queue length and completion status
+- Active, completed, failed, and deferred jobs
+- Completion percentage tracking
+
+**Cluster Host Utilization**:
+- Individual host CPU and memory usage
+- Color-coded utilization levels (idle/low/medium/high)
+- Grid layout supporting 100+ hosts
+
+**Environment Monitoring**:
+- Current simulation time and decision steps
+- Episode progress and phase indicators
+- Scheduling decision status
+
+### Quick Start
+
+1. **Run Script**: `./run_visualizer.sh` in `web_dashboard/`
+2. **Select Experiment**: Choose from available trained experiments
+3. **Select Checkpoint**: Pick model checkpoint to visualize
+4. **Start Episode**: Click "Start Episode" and select seed (42, 43, 44)
+5. **Watch Visualization**: Real-time updates at 10 FPS
+
+### Requirements
+
+The visualizer requires:
+- **Test Data**: `logs/[experiment]/test_env_data.json`
+- **Model Checkpoints**: `logs/[experiment]/checkpoints/*.pt`
+- **Dependencies**: Automatically installed by the script
 
 ### Metrics
 
@@ -298,7 +342,7 @@ config = {
 }
 ```
 
-## Debugging and Monitoring
+## Monitoring
 
 ### TensorBoard Integration
 
@@ -314,48 +358,4 @@ tensorboard --logdir logs/
 - Learning rate schedules
 - Exploration statistics
 
-### Debug Scripts
 
-```bash
-# Detailed training analysis
-python scripts/debug/debug_detailed.py
-
-# PPO algorithm debugging
-python scripts/debug/debug_ppo.py
-
-# Architecture benchmarking
-python scripts/debug/benchmark_hidden_sizes.py
-```
-
-## Troubleshooting
-
-### Common Issues
-
-**Rust compilation errors**:
-- Update Rust: `rustup update`
-- Install Python dev headers: `apt-get install python3-dev`
-
-**Training instability**:
-- Reduce learning rate: `--lr 1e-4`
-- Increase rollout steps: `--rollout-steps 8192`
-- Enable gradient clipping (default: enabled)
-
-**Memory issues**:
-- Reduce rollout steps or number of environments
-- Use CPU training for small models
-
-**Import errors**:
-- Verify Python path includes project root
-- Check that Rust library compiled successfully
-
-### Performance Tuning
-
-**For faster training**:
-- Use larger minibatch sizes with GPU
-- Enable multi-environment training
-- Increase rollout length for better sample efficiency
-
-**For memory efficiency**:
-- Reduce rollout steps
-- Use single environment training
-- Enable gradient accumulation
