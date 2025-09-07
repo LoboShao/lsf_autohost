@@ -93,6 +93,9 @@ logs/
 # Claude.md - personal assistant instructions
 **/CLAUDE.md
 
+# Scripts folder - unused/legacy code
+scripts/
+
 # Web Dashboard
 web_dashboard/node_modules/
 web_dashboard/client/node_modules/
