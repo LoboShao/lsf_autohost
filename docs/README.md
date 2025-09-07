@@ -366,10 +366,56 @@ The script will automatically:
 
 ### Requirements
 
-The visualizer requires:
+**Prerequisites**:
+- **Node.js**: 16+ required for React and server
+- **npm**: Package manager for dependencies
+
+**Dependencies** (automatically installed by script):
+
+**Server Dependencies**:
+```json
+{
+  "express": "^4.18.2",
+  "socket.io": "^4.7.2", 
+  "cors": "^2.8.5",
+  "child_process": "^1.0.2",
+  "nodemon": "^3.0.1",
+  "concurrently": "^8.2.2"
+}
+```
+
+**Client Dependencies**:
+```json
+{
+  "@emotion/react": "^11.11.1",
+  "@emotion/styled": "^11.11.0", 
+  "@mui/material": "^5.14.1",
+  "@mui/icons-material": "^5.14.1",
+  "react": "^18.2.0",
+  "react-dom": "^18.2.0",
+  "react-scripts": "5.0.1",
+  "plotly.js": "^2.26.0",
+  "react-plotly.js": "^2.6.0",
+  "socket.io-client": "^4.7.2",
+  "typescript": "^4.9.5"
+}
+```
+
+**Data Requirements**:
 - **Test Data**: `logs/[experiment]/test_env_data.json`
 - **Model Checkpoints**: `logs/[experiment]/checkpoints/*.pt`
-- **Dependencies**: Automatically installed by the script
+
+**Manual Installation** (if needed):
+```bash
+# Navigate to web dashboard
+cd web_dashboard
+
+# Install server dependencies
+npm install
+
+# Install client dependencies
+cd client && npm install
+```
 
 
 ## Configuration Files
