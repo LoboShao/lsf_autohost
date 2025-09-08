@@ -15,7 +15,7 @@ pub struct Job {
     pub submission_time: f64,
     pub start_time: Option<f64>,
     pub end_time: Option<f64>,
-    pub assigned_hosts: Vec<(usize, u32, u32)>, // (host_id, cores_allocated, memory_allocated)
+    pub assigned_host: Option<usize>,
     pub status: JobStatus,
 }
 
@@ -35,20 +35,8 @@ impl Job {
             submission_time,
             start_time: None,
             end_time: None,
-            assigned_hosts: Vec::new(),
+            assigned_host: None,
             status: JobStatus::Pending,
         }
-    }
-    
-    pub fn is_multihost(&self) -> bool {
-        self.assigned_hosts.len() > 1
-    }
-    
-    pub fn total_allocated_cores(&self) -> u32 {
-        self.assigned_hosts.iter().map(|(_, cores, _)| cores).sum()
-    }
-    
-    pub fn total_allocated_memory(&self) -> u32 {
-        self.assigned_hosts.iter().map(|(_, _, memory)| memory).sum()
     }
 }

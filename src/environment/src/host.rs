@@ -44,8 +44,7 @@ impl Host {
         if self.can_accommodate(job) {
             self.available_cores -= job.cores_required;
             self.available_memory -= job.memory_required;
-            job.assigned_hosts.clear();
-            job.assigned_hosts.push((self.id, job.cores_required, job.memory_required));
+            job.assigned_host = Some(self.id);
             self.running_job_ids.insert(job.id, job.clone());
             true
         } else {
@@ -53,34 +52,13 @@ impl Host {
         }
     }
     
-    pub fn allocate_partial(&mut self, job_id: u32, cores_to_allocate: u32, memory_to_allocate: u32) -> bool {
-        if self.available_cores >= cores_to_allocate && self.available_memory >= memory_to_allocate {
-            self.available_cores -= cores_to_allocate;
-            self.available_memory -= memory_to_allocate;
-            
-            // Create a partial job representation for this host
-            let mut partial_job = Job::new(job_id, cores_to_allocate, memory_to_allocate, 0, 0.0);
-            partial_job.assigned_hosts.push((self.id, cores_to_allocate, memory_to_allocate));
-            self.running_job_ids.insert(job_id, partial_job);
-            true
-        } else {
-            false
-        }
-    }
     
     pub fn release_job(&mut self, job: &Job) {
-        // For multi-host jobs, only release resources allocated on this host
         if let Some(running_job) = self.running_job_ids.get(&job.id) {
             self.available_cores += running_job.cores_required;
             self.available_memory += running_job.memory_required;
             self.running_job_ids.remove(&job.id);
         }
-    }
-    
-    pub fn release_partial(&mut self, job_id: u32, cores_to_release: u32, memory_to_release: u32) {
-        self.available_cores += cores_to_release;
-        self.available_memory += memory_to_release;
-        self.running_job_ids.remove(&job_id);
     }
     
     pub fn get_core_utilization(&self) -> f32 {

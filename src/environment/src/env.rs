@@ -94,7 +94,7 @@ impl ClusterSchedulerEnv {
         max_time = 4096,
         seed = None
     ))]
-    pub fn new(
+    fn new(
         num_hosts: usize,
         max_queue_length: Option<usize>,
         host_cores_range: (u32, u32),
@@ -797,9 +797,9 @@ impl ClusterSchedulerEnv {
                 job.end_time = Some(event.completion_time);
                 job.status = JobStatus::Completed;
                 
-                // Release resources from all hosts involved in this job
-                for &(host_id, cores, memory) in &job.assigned_hosts {
-                    self.hosts[host_id].release_partial(job.id, cores, memory);
+                // Release from host
+                if let Some(host_id) = job.assigned_host {
+                    self.hosts[host_id].release_job(&job);
                 }
                 
                 self.total_jobs_completed += 1;
@@ -850,6 +850,20 @@ impl ClusterSchedulerEnv {
     // Removed create_job_buckets - no longer needed for single job scheduling
     
     fn schedule_single_job_from_submission(&mut self, job: Job, action: &[f64]) -> usize {
+        // First check if this job can be scheduled on ANY host
+        let can_be_scheduled = self.hosts.iter().any(|host| {
+            host.total_cores >= job.cores_required && host.total_memory >= job.memory_required
+        });
+        
+        if !can_be_scheduled {
+            // Job requires more resources than any host can provide
+            // Mark as failed to prevent infinite loop
+            self.total_jobs_failed += 1;
+            println!("WARNING: Job {} cannot be scheduled on any host (requires {} cores, {} MB memory)", 
+                     job.id, job.cores_required, job.memory_required);
+            return 0; // Don't defer, just fail
+        }
+        
         // Sort hosts by priority (descending)
         let mut host_priorities: Vec<(usize, f64)> = action.iter()
             .enumerate()
@@ -857,7 +871,7 @@ impl ClusterSchedulerEnv {
             .collect();
         host_priorities.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
         
-        // First try single-host scheduling in priority order
+        // Try hosts in priority order
         for &(host_idx, _) in &host_priorities {
             let host = &mut self.hosts[host_idx];
             
@@ -865,7 +879,7 @@ impl ClusterSchedulerEnv {
                 // Clone only when we can actually schedule the job
                 let mut job_to_schedule = job.clone();
                 
-                // Successfully schedule on single host
+                // Successfully schedule
                 if host.allocate_job(&mut job_to_schedule) {
                     job_to_schedule.start_time = Some(self.current_time as f64);
                     
@@ -887,88 +901,10 @@ impl ClusterSchedulerEnv {
             }
         }
         
-        // If single-host scheduling fails, try multi-host scheduling
-        let scheduled = self.try_multihost_scheduling(job.clone(), &host_priorities);
-        if scheduled {
-            return 1;
-        }
-        
-        // Check if this job can theoretically be scheduled (total cluster resources)
-        let total_available_cores: u32 = self.hosts.iter().map(|h| h.available_cores).sum();
-        let total_available_memory: u32 = self.hosts.iter().map(|h| h.available_memory).sum();
-        
-        if job.cores_required > total_available_cores || job.memory_required > total_available_memory {
-            // Not enough total resources in cluster, defer for later
-            self.deferred_jobs.push_back(job);
-        } else {
-            // Enough total resources exist but fragmented, defer for later
-            self.deferred_jobs.push_back(job);
-        }
+        // Put unscheduled job to deferred queue - will be retried after time advances
+        self.deferred_jobs.push_back(job);
         
         0 // No job scheduled
-    }
-    
-    fn try_multihost_scheduling(&mut self, mut job: Job, host_priorities: &[(usize, f64)]) -> bool {
-        // Multi-host scheduling: distributes CPU cores across hosts
-        // Memory requirement must be satisfied by EACH participating host (not distributed)
-        let mut cores_remaining = job.cores_required;
-        let mut allocations: Vec<(usize, u32, u32)> = Vec::new();
-        
-        // Try to allocate cores from hosts in priority order
-        for &(host_idx, _) in host_priorities {
-            if cores_remaining == 0 {
-                break;
-            }
-            
-            let host = &self.hosts[host_idx];
-            
-            // Only consider hosts that have available cores AND enough memory
-            // Each participating host must have the full memory requirement available
-            if host.available_cores > 0 && host.available_memory >= job.memory_required {
-                let cores_to_allocate = cores_remaining.min(host.available_cores);
-                
-                // Each host will allocate the full memory requirement
-                allocations.push((host_idx, cores_to_allocate, job.memory_required));
-                cores_remaining -= cores_to_allocate;
-            }
-        }
-        
-        // Check if we can satisfy core requirements
-        if cores_remaining == 0 {
-            // Allocate resources on all selected hosts
-            // Each host provides some cores and the FULL memory requirement
-            for &(host_idx, cores, memory) in &allocations {
-                self.hosts[host_idx].allocate_partial(job.id, cores, memory);
-            }
-            
-            // Log multi-host scheduling before moving values
-            let job_id = job.id;
-            let num_hosts = allocations.len();
-            let total_memory = allocations.len() as u32 * job.memory_required;
-            // println!("INFO: Job {} scheduled across {} hosts (cores distributed, {} MB memory on each host, total {} MB)", 
-            //          job_id, num_hosts, job.memory_required, total_memory);
-            
-            // Update job with multi-host allocation
-            job.assigned_hosts = allocations;
-            job.start_time = Some(self.current_time as f64);
-            
-            // Record waiting time
-            let waiting_time = self.current_time as f64 - job.submission_time;
-            self.total_waiting_time_all_jobs += waiting_time;
-            
-            // Schedule completion
-            let completion_time = (self.current_time + job.duration as u64) as f64;
-            self.completion_heap.push(CompletionEvent {
-                completion_time,
-                job_id: job.id,
-            });
-            
-            self.active_jobs.insert(job.id, job);
-            
-            return true;
-        }
-        
-        false
     }
 
     
