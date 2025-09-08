@@ -945,8 +945,8 @@ impl ClusterSchedulerEnv {
             let job_id = job.id;
             let num_hosts = allocations.len();
             let total_memory = allocations.len() as u32 * job.memory_required;
-            println!("INFO: Job {} scheduled across {} hosts (cores distributed, {} MB memory on each host, total {} MB)", 
-                     job_id, num_hosts, job.memory_required, total_memory);
+            // println!("INFO: Job {} scheduled across {} hosts (cores distributed, {} MB memory on each host, total {} MB)", 
+            //          job_id, num_hosts, job.memory_required, total_memory);
             
             // Update job with multi-host allocation
             job.assigned_hosts = allocations;
