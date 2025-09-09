@@ -1,12 +1,11 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torch.distributions import Normal
 import numpy as np
 
 
-class VariableHostPolicy(nn.Module):
-    """Variable Host Policy that processes hosts individually using attention mechanism."""
+class VariableHostMLPPolicy(nn.Module):
+    """Simple MLP-based Variable Host Policy without encoders or attention."""
     
     def __init__(self, obs_dim, action_dim, num_hosts=30, exploration_noise_decay=0.995, min_exploration_noise=0.01):
         super().__init__()
@@ -14,23 +13,28 @@ class VariableHostPolicy(nn.Module):
         self.action_dim = action_dim
         self.num_hosts = num_hosts
         
-        self.hidden_size = 16
-        
         # Exploration noise scheduling
         self.exploration_noise_decay = exploration_noise_decay
         self.min_exploration_noise = min_exploration_noise
         self.current_exploration_noise = 1.0
         
-        self.host_encoder = nn.Linear(4, self.hidden_size)
+        # Simple direct mapping: host features to priorities
+        self.host_priority_net = nn.Sequential(
+            nn.Linear(4, 8),   # Just host features → small hidden
+            nn.ReLU(),
+            nn.Linear(8, 1)    # → priority
+        )
         
-        self.job_encoder = nn.Linear(2, self.hidden_size)
+        # Job influence on priorities
+        self.job_influence_net = nn.Sequential(
+            nn.Linear(2, 4),   # Job features → influence vector
+            nn.ReLU(),
+            nn.Linear(4, 1)    # → global influence scalar
+        )
         
-        self.attention = nn.MultiheadAttention(self.hidden_size, num_heads=2, batch_first=True)
-        
-        self.priority_head = nn.Linear(self.hidden_size, 1)
-        
+        # Smaller value head
         self.value_head = nn.Sequential(
-            nn.Linear(self.hidden_size, 64),
+            nn.Linear(obs_dim, 64),
             nn.ReLU(),
             nn.Linear(64, 1)
         )
@@ -57,20 +61,19 @@ class VariableHostPolicy(nn.Module):
         host_features = obs[:, :num_hosts * 4].view(batch_size, num_hosts, 4)  # [batch, num_hosts, 4]
         job_features = obs[:, -2:]  # [batch, 2]
         
-        # Encode features with activation
-        host_embeds = F.relu(self.host_encoder(host_features))  # [batch, num_hosts, hidden_size]
-        job_embed = F.relu(self.job_encoder(job_features)).unsqueeze(1)  # [batch, 1, hidden_size]
+        # Process host features to get base priorities
+        host_flat = host_features.view(-1, 4)  # [batch * num_hosts, 4]
+        base_priorities = self.host_priority_net(host_flat)  # [batch * num_hosts, 1]
+        base_priorities = base_priorities.view(batch_size, num_hosts)  # [batch, num_hosts]
         
-        # Attention: job queries host capabilities
-        attended_hosts, attention_weights = self.attention(job_embed, host_embeds, host_embeds)  # [batch, 1, hidden_size]
+        # Get job influence (global modifier)
+        job_influence = self.job_influence_net(job_features)  # [batch, 1]
         
-        # Generate priorities for each host using attention-weighted host features
-        # Apply attention weights to original host embeddings
-        weighted_host_embeds = attention_weights.squeeze(1).unsqueeze(-1) * host_embeds  # [batch, num_hosts, hidden_size]
-        action_mean = torch.sigmoid(self.priority_head(weighted_host_embeds).squeeze(-1))  # [batch, num_hosts]
+        # Apply job influence to base priorities
+        action_mean = torch.sigmoid(base_priorities + job_influence)  # [batch, num_hosts]
         
-        # Value estimation using attended job-host representation
-        value = self.value_head(attended_hosts.squeeze(1))  # [batch, 1]
+        # Value estimation using global features
+        value = self.value_head(obs)  # [batch, 1]
         
         # Skip expensive action_std computation for deterministic inference
         if deterministic:

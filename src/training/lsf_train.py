@@ -21,14 +21,14 @@ def parse_args():
     parser.add_argument('--max-queue-length', type=int, default=100*100, help='Maximum queue length')
     
     # Host/Job resource ranges - INCREASED LOAD FOR SCHEDULING PRESSURE
-    parser.add_argument('--host-cores-min', type=int, default=16, help='Minimum host cores')
-    parser.add_argument('--host-cores-max', type=int, default=32, help='Maximum host cores')
+    parser.add_argument('--host-cores-min', type=int, default=32, help='Minimum host cores')
+    parser.add_argument('--host-cores-max', type=int, default=64, help='Maximum host cores')
     parser.add_argument('--host-memory-min', type=int, default=64*1024, help='Minimum host memory (MB)')
     parser.add_argument('--host-memory-max', type=int, default=128*1024, help='Maximum host memory (MB)')
     parser.add_argument('--job-cores-min', type=int, default=1, help='Minimum job cores - bigger minimum jobs')
-    parser.add_argument('--job-cores-max', type=int, default=4, help='Maximum job cores - larger synthesis/PnR jobs')
-    parser.add_argument('--job-memory-min', type=int, default=1*512, help='Minimum job memory (MB) - 4GB realistic minimum')
-    parser.add_argument('--job-memory-max', type=int, default=4*1024, help='Maximum job memory (MB) - 16GB for larger jobs')
+    parser.add_argument('--job-cores-max', type=int, default=8, help='Maximum job cores - larger synthesis/PnR jobs')
+    parser.add_argument('--job-memory-min', type=int, default=1*1024, help='Minimum job memory (MB) - 4GB realistic minimum')
+    parser.add_argument('--job-memory-max', type=int, default=8*1024, help='Maximum job memory (MB) - 16GB for larger jobs')
     parser.add_argument('--job-duration-min', type=int, default=20, help='Minimum job duration (seconds) - shorter for more turnover')
     parser.add_argument('--job-duration-max', type=int, default=120, help='Maximum job duration (seconds) - moderate length jobs')
     
@@ -82,7 +82,7 @@ def create_model(obs_dim, action_dim, num_hosts, exploration_noise_decay=0.995, 
     #     exploration_noise_decay=exploration_noise_decay,
     #     min_exploration_noise=min_exploration_noise
     # )
-    # return MLPPolicy(
+    # return VariableHostMLPPolicy(
     #     obs_dim=obs_dim, 
     #     action_dim=action_dim, 
     #     num_hosts=num_hosts,

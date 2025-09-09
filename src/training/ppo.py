@@ -854,6 +854,16 @@ class PPOTrainer:
         print(f"TensorBoard logs: {self.writer.log_dir}")
         print(f"Test episodes will run every {self.metrics_reporter.test_interval} updates")
         
+        # Run initial test before training begins
+        print("\nRunning initial performance test...")
+        ppo_metrics = self.test_with_metrics(num_episodes=1, update_count=0, policy_name="PPO", test_seeds=[42])
+        baseline_metrics = self.test_baseline_with_metrics(num_episodes=1, update_count=0, test_seeds=[42])
+        
+        # Log initial comparison
+        self.log_metric_comparison(ppo_metrics, baseline_metrics, 0)
+        print(f"Initial PPO performance - Episode Return: {ppo_metrics['episode_return']:.1f}, Makespan: {ppo_metrics['makespan']:.0f}")
+        print(f"Initial Baseline performance - Episode Return: {baseline_metrics['episode_return']:.1f}, Makespan: {baseline_metrics['makespan']:.0f}")
+        
         start_time = time.time()
         
         while timesteps_collected < total_timesteps:

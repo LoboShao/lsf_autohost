@@ -613,7 +613,7 @@ impl ClusterSchedulerEnv {
         
         // Generate job arrival schedule for each timestep
         for _timestep in 0..max_time {
-            let num_jobs = rng.gen_range(1..=max_jobs_per_step);
+            let num_jobs = Self::generate_skewed_job_arrivals(max_jobs_per_step, rng);
             job_arrival_schedule.push(num_jobs);
             
             // Generate properties for jobs arriving at this timestep
@@ -712,6 +712,38 @@ impl ClusterSchedulerEnv {
         } else {
             valid_memory[rng.gen_range(0..valid_memory.len())]
         }
+    }
+
+    fn generate_skewed_job_arrivals(max_jobs_per_step: usize, rng: &mut StdRng) -> usize {
+        // Create a skewed distribution favoring higher values
+        // Target: For max=50, average should be around 35 (70% of max)
+        // Use Beta distribution transformed to desired range
+        
+        // Beta(2, 1) gives us right-skewed distribution (more values near 1.0)
+        // For stronger skew toward high values, use Beta(3, 1) or even Beta(4, 1)
+        let alpha = 3.0;
+        let beta = 1.0;
+        
+        // Generate two uniform samples to create Beta distribution using acceptance-rejection
+        let sample = loop {
+            let u1: f64 = rng.gen();
+            let u2: f64 = rng.gen();
+            
+            // Simple Beta(alpha, beta) using ratio of uniforms method
+            let x = u1.powf(1.0 / alpha);
+            let y = u2.powf(1.0 / beta);
+            let sum = x + y;
+            
+            if sum <= 1.0 {
+                break x / sum;
+            }
+        };
+        
+        // Transform to range [1, max_jobs_per_step]
+        let scaled = 1.0 + sample * (max_jobs_per_step - 1) as f64;
+        
+        // Clamp and round to ensure valid range
+        scaled.round().max(1.0).min(max_jobs_per_step as f64) as usize
     }
     
     fn simulate_job_submissions(&mut self) {
