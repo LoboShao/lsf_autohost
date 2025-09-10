@@ -15,9 +15,9 @@ def parse_args():
     parser = argparse.ArgumentParser(description='Train PPO agent on LSF scheduling environment with arrival-time batching')
     
     # Environment args - OPTIMIZED FOR JOB CYCLES  
-    parser.add_argument('--num-hosts', type=int, default=50, help='Number of hosts in the cluster')
-    parser.add_argument('--episode-length', type=int, default=200, help='Episode length in steps (matches rollout steps)')
-    parser.add_argument('--max-jobs-per-step', type=int, default=50, help='Maximum jobs per step - much higher load for resource pressure')
+    parser.add_argument('--num-hosts', type=int, default=30, help='Number of hosts in the cluster')
+    parser.add_argument('--episode-length', type=int, default=500, help='Episode length in steps (matches rollout steps)')
+    parser.add_argument('--max-jobs-per-step', type=int, default=3, help='Maximum jobs per step - much higher load for resource pressure')
     parser.add_argument('--max-queue-length', type=int, default=100*100, help='Maximum queue length')
     
     # Host/Job resource ranges - INCREASED LOAD FOR SCHEDULING PRESSURE
@@ -29,14 +29,14 @@ def parse_args():
     parser.add_argument('--job-cores-max', type=int, default=8, help='Maximum job cores - larger synthesis/PnR jobs')
     parser.add_argument('--job-memory-min', type=int, default=1*1024, help='Minimum job memory (MB) - 4GB realistic minimum')
     parser.add_argument('--job-memory-max', type=int, default=8*1024, help='Maximum job memory (MB) - 16GB for larger jobs')
-    parser.add_argument('--job-duration-min', type=int, default=20, help='Minimum job duration (seconds) - shorter for more turnover')
-    parser.add_argument('--job-duration-max', type=int, default=120, help='Maximum job duration (seconds) - moderate length jobs')
+    parser.add_argument('--job-duration-min', type=int, default=10, help='Minimum job duration (seconds) - shorter for more turnover')
+    parser.add_argument('--job-duration-max', type=int, default=300, help='Maximum job duration (seconds) - moderate length jobs')
     
     # Training args - OPTIMIZED FOR BATCH REWARDS & JOB CYCLES
     # Formula: total_timesteps = rollout_steps × num_envs × num_updates
     # Default: 4096 × 3 × 4096 = 33,554,432 timesteps (~2048 updates)
-    parser.add_argument('--total-timesteps', type=int, default=12288*1*4096, help='Total training timesteps: rollout_steps × num_envs × num_updates')
-    parser.add_argument('--rollout-steps', type=int, default=12288, help='Longer rollouts for sparse rewards - complete episodes')
+    parser.add_argument('--total-timesteps', type=int, default=4096*3*4096, help='Total training timesteps: rollout_steps × num_envs × num_updates')
+    parser.add_argument('--rollout-steps', type=int, default=4096, help='Longer rollouts for sparse rewards - complete episodes')
     parser.add_argument('--lr', type=float, default=3e-4, help='Lower learning rate for sparse reward stability')
     parser.add_argument('--gamma', type=float, default=0.995, help='Higher discount factor for sparse rewards')
     parser.add_argument('--lam', type=float, default=0.99, help='Higher GAE lambda for sparse rewards')
@@ -45,7 +45,7 @@ def parse_args():
     parser.add_argument('--vf-coef', type=float, default=2.0, help='Higher value function weight for sparse rewards')
     parser.add_argument('--update-epochs', type=int, default=2, help='More epochs to learn from sparse signals')
     parser.add_argument('--minibatch-size', type=int, default=512, help='Smaller minibatches for more updates')
-    parser.add_argument('--buffer-size', type=int, default=12288, help='Rollout buffer size - MATCHES ROLLOUT STEPS')
+    parser.add_argument('--buffer-size', type=int, default=4096, help='Rollout buffer size - MATCHES ROLLOUT STEPS')
 
     # System args
     parser.add_argument('--device', type=str, default='cpu', help='Device to use (auto, cpu, cuda, mps) - cpu is fastest for small models')
@@ -68,7 +68,7 @@ def parse_args():
     parser.add_argument('--resume-from', type=str, default=None, help='Resume training from checkpoint')
     parser.add_argument('--exploration-noise-decay', type=float, default=0.998, help='Exploration noise decay factor - slower decay')
     parser.add_argument('--min-exploration-noise', type=float, default=0.1, help='Minimum exploration noise')
-    parser.add_argument('--num-envs', type=int, default=1, help='Number of parallel environments - more for better sampling')
+    parser.add_argument('--num-envs', type=int, default=3, help='Number of parallel environments - more for better sampling')
     
     return parser.parse_args()
 

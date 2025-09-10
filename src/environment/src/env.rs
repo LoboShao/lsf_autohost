@@ -23,6 +23,7 @@ pub struct ClusterSchedulerEnv {
     job_duration_range: (u32, u32),
     max_jobs_per_step: usize,
     max_time: usize,  // Maximum time for job generation (after this, wait for completion)
+    use_skewed_arrivals: bool,  // Whether to use skewed job arrival distribution
     
     // State
     hosts: Vec<Host>,
@@ -92,6 +93,7 @@ impl ClusterSchedulerEnv {
         job_duration_range = (1, 60),
         max_jobs_per_step = 50,
         max_time = 4096,
+        use_skewed_arrivals = false,
         seed = None
     ))]
     fn new(
@@ -104,6 +106,7 @@ impl ClusterSchedulerEnv {
         job_duration_range: (u32, u32),
         max_jobs_per_step: usize,
         max_time: usize,
+        use_skewed_arrivals: bool,
         seed: Option<u64>,
     ) -> Self {
         // Calculate max_queue_length if provided externally; otherwise default to max_time * max_jobs_per_step
@@ -123,6 +126,7 @@ impl ClusterSchedulerEnv {
                 job_cores_range,
                 job_memory_range,
                 job_duration_range,
+                use_skewed_arrivals,
                 &mut rng
             );
 
@@ -150,6 +154,7 @@ impl ClusterSchedulerEnv {
             job_duration_range,
             max_jobs_per_step,
             max_time,
+            use_skewed_arrivals,
             hosts,
             host_core_utils,
             host_memory_utils,
@@ -273,6 +278,7 @@ impl ClusterSchedulerEnv {
                     self.job_cores_range,
                     self.job_memory_range,
                     self.job_duration_range,
+                    self.use_skewed_arrivals,
                     &mut schedule_rng
                 );
             
@@ -330,7 +336,7 @@ impl ClusterSchedulerEnv {
         let will_advance_time = self.submission_queue.is_empty() && self.job_queue.is_empty();
         
         // Calculate reward based on current state (before any changes)
-        let total_reward = self.calculate_adaptive_efficiency_reward(will_advance_time, jobs_scheduled) as f32;
+        let total_reward = self.calculate_pure_resource_utilization_reward() as f32;
         
         // NOW advance time if needed (after reward calculation)
         if will_advance_time {
@@ -345,19 +351,8 @@ impl ClusterSchedulerEnv {
         
         self.current_step += 1;
         
-        // Episode ends when all deterministic jobs are completed and no jobs remain
-        let all_jobs_generated = self.current_time >= self.max_time as u64;
-        let all_jobs_finished = self.job_queue.is_empty() && 
-                               self.submission_queue.is_empty() && 
-                               self.deferred_jobs.is_empty() && 
-                               self.active_jobs.is_empty();
-        
-        // Safety check: If we're past max_time and stuck with no progress for too long
-        let stuck_too_long = all_jobs_generated && 
-                            self.current_time > (self.max_time as u64 + 1000) && 
-                            !self.deferred_jobs.is_empty();
-        
-        let done = (all_jobs_generated && all_jobs_finished) || stuck_too_long;
+        // Episode ends when current time equals max time
+        let done = self.current_time >= self.max_time as u64;
         
         // Set makespan when episode ends (all jobs finished)
         if done && self.makespan.is_none() {
@@ -601,6 +596,7 @@ impl ClusterSchedulerEnv {
         job_cores_range: (u32, u32),
         job_memory_range: (u32, u32),
         job_duration_range: (u32, u32),
+        use_skewed_arrivals: bool,
         rng: &mut StdRng,
     ) -> (Vec<usize>, Vec<u32>, Vec<u32>, Vec<u32>, usize) {
         let mut job_arrival_schedule = Vec::with_capacity(max_time);
@@ -613,7 +609,7 @@ impl ClusterSchedulerEnv {
         
         // Generate job arrival schedule for each timestep
         for _timestep in 0..max_time {
-            let num_jobs = Self::generate_skewed_job_arrivals(max_jobs_per_step, rng);
+            let num_jobs = Self::generate_job_arrivals(max_jobs_per_step, use_skewed_arrivals, rng);
             job_arrival_schedule.push(num_jobs);
             
             // Generate properties for jobs arriving at this timestep
@@ -714,36 +710,41 @@ impl ClusterSchedulerEnv {
         }
     }
 
-    fn generate_skewed_job_arrivals(max_jobs_per_step: usize, rng: &mut StdRng) -> usize {
-        // Create a skewed distribution favoring higher values
-        // Target: For max=50, average should be around 35 (70% of max)
-        // Use Beta distribution transformed to desired range
-        
-        // Beta(2, 1) gives us right-skewed distribution (more values near 1.0)
-        // For stronger skew toward high values, use Beta(3, 1) or even Beta(4, 1)
-        let alpha = 3.0;
-        let beta = 1.0;
-        
-        // Generate two uniform samples to create Beta distribution using acceptance-rejection
-        let sample = loop {
-            let u1: f64 = rng.gen();
-            let u2: f64 = rng.gen();
+    fn generate_job_arrivals(max_jobs_per_step: usize, use_skewed: bool, rng: &mut StdRng) -> usize {
+        if use_skewed {
+            // Create a skewed distribution favoring higher values
+            // Target: For max=50, average should be around 35 (70% of max)
+            // Use Beta distribution transformed to desired range
             
-            // Simple Beta(alpha, beta) using ratio of uniforms method
-            let x = u1.powf(1.0 / alpha);
-            let y = u2.powf(1.0 / beta);
-            let sum = x + y;
+            // Beta(2, 1) gives us right-skewed distribution (more values near 1.0)
+            // For stronger skew toward high values, use Beta(3, 1) or even Beta(4, 1)
+            let alpha = 2.0;
+            let beta = 1.0;
             
-            if sum <= 1.0 {
-                break x / sum;
-            }
-        };
-        
-        // Transform to range [1, max_jobs_per_step]
-        let scaled = 1.0 + sample * (max_jobs_per_step - 1) as f64;
-        
-        // Clamp and round to ensure valid range
-        scaled.round().max(1.0).min(max_jobs_per_step as f64) as usize
+            // Generate two uniform samples to create Beta distribution using acceptance-rejection
+            let sample = loop {
+                let u1: f64 = rng.gen();
+                let u2: f64 = rng.gen();
+                
+                // Simple Beta(alpha, beta) using ratio of uniforms method
+                let x = u1.powf(1.0 / alpha);
+                let y = u2.powf(1.0 / beta);
+                let sum = x + y;
+                
+                if sum <= 1.0 {
+                    break x / sum;
+                }
+            };
+            
+            // Transform to range [1, max_jobs_per_step]
+            let scaled = 1.0 + sample * (max_jobs_per_step - 1) as f64;
+            
+            // Clamp and round to ensure valid range
+            scaled.round().max(1.0).min(max_jobs_per_step as f64) as usize
+        } else {
+            // Uniform distribution over [1, max_jobs_per_step]
+            rng.gen_range(1..=max_jobs_per_step)
+        }
     }
     
     fn simulate_job_submissions(&mut self) {
@@ -1023,6 +1024,24 @@ impl ClusterSchedulerEnv {
         let total_available: u32 = self.hosts.iter().map(|h| h.available_cores).sum();
         let total_capacity: u32 = self.hosts.iter().map(|h| h.total_cores).sum();
         1.0 - (total_available as f64 / total_capacity as f64)
+    }
+
+    fn calculate_pure_resource_utilization_reward(&self) -> f64 {
+        let mut total_core_util = 0.0;
+        let mut total_memory_util = 0.0;
+        
+        // Sum utilization across all hosts
+        for i in 0..self.num_hosts {
+            total_core_util += self.host_core_utils[i] as f64;
+            total_memory_util += self.host_memory_utils[i] as f64;
+        }
+        
+        // Average utilization across cluster
+        let avg_core_util = total_core_util / self.num_hosts as f64;
+        let avg_memory_util = total_memory_util / self.num_hosts as f64;
+        
+        // Combined utilization reward (equal weight to cores and memory)
+        (avg_core_util + avg_memory_util) / 2.0
     }
 
 }
