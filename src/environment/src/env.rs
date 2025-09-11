@@ -1027,21 +1027,17 @@ impl ClusterSchedulerEnv {
     }
 
     fn calculate_pure_resource_utilization_reward(&self) -> f64 {
-        let mut total_core_util = 0.0;
-        let mut total_memory_util = 0.0;
-        
-        // Sum utilization across all hosts
-        for i in 0..self.num_hosts {
-            total_core_util += self.host_core_utils[i] as f64;
-            total_memory_util += self.host_memory_utils[i] as f64;
-        }
-        
-        // Average utilization across cluster
-        let avg_core_util = total_core_util / self.num_hosts as f64;
-        let avg_memory_util = total_memory_util / self.num_hosts as f64;
-        
-        // Combined utilization reward (equal weight to cores and memory)
-        (avg_core_util + avg_memory_util) / 2.0
-    }
 
+        let mut rewards = 0.0;
+        
+        for i in 0..self.num_hosts {
+            let core_util = self.host_core_utils[i] as f64;
+            let memory_util = self.host_memory_utils[i] as f64;
+
+            rewards += (core_util + memory_util)/2.0;
+
+        }
+        rewards = rewards / self.num_hosts as f64;
+        rewards
+    }
 }

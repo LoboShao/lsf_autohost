@@ -14,7 +14,7 @@ class VariableHostPolicy(nn.Module):
         self.action_dim = action_dim
         self.num_hosts = num_hosts
         
-        self.hidden_size = 16
+        self.hidden_size = 32
         
         # Exploration noise scheduling
         self.exploration_noise_decay = exploration_noise_decay
@@ -25,7 +25,7 @@ class VariableHostPolicy(nn.Module):
         
         self.job_encoder = nn.Linear(2, self.hidden_size)
         
-        self.attention = nn.MultiheadAttention(self.hidden_size, num_heads=2, batch_first=True)
+        self.attention = nn.MultiheadAttention(self.hidden_size, num_heads=4, batch_first=True)
         
         self.priority_head = nn.Linear(self.hidden_size, 1)
         
