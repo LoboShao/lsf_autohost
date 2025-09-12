@@ -1,6 +1,5 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torch.distributions import Normal
 import numpy as np
 
@@ -14,16 +13,24 @@ class VariableHostPolicy(nn.Module):
         self.action_dim = action_dim
         self.num_hosts = num_hosts
         
-        self.hidden_size = 32
+        self.hidden_size = 64
         
         # Exploration noise scheduling
         self.exploration_noise_decay = exploration_noise_decay
         self.min_exploration_noise = min_exploration_noise
         self.current_exploration_noise = 1.0
         
-        self.host_encoder = nn.Linear(4, self.hidden_size)
+        self.host_encoder = nn.Sequential(
+            nn.Linear(4, 64),
+            nn.GELU(),
+            nn.Linear(64, self.hidden_size)
+        )
         
-        self.job_encoder = nn.Linear(2, self.hidden_size)
+        self.job_encoder = nn.Sequential(
+            nn.Linear(2, 64),
+            nn.GELU(),
+            nn.Linear(64, self.hidden_size)
+        )
         
         self.attention = nn.MultiheadAttention(self.hidden_size, num_heads=4, batch_first=True)
         
@@ -31,7 +38,7 @@ class VariableHostPolicy(nn.Module):
         
         self.value_head = nn.Sequential(
             nn.Linear(self.hidden_size, 64),
-            nn.ReLU(),
+            nn.GELU(),
             nn.Linear(64, 1)
         )
         
@@ -57,17 +64,17 @@ class VariableHostPolicy(nn.Module):
         host_features = obs[:, :num_hosts * 4].view(batch_size, num_hosts, 4)  # [batch, num_hosts, 4]
         job_features = obs[:, -2:]  # [batch, 2]
         
-        # Encode features with activation
-        host_embeds = F.relu(self.host_encoder(host_features))  # [batch, num_hosts, hidden_size]
-        job_embed = F.relu(self.job_encoder(job_features)).unsqueeze(1)  # [batch, 1, hidden_size]
+        # Encode features (activation inside encoders now)
+        host_embeds = self.host_encoder(host_features)  # [batch, num_hosts, hidden_size]
+        job_embed = self.job_encoder(job_features).unsqueeze(1)  # [batch, 1, hidden_size]
         
         # Attention: job queries host capabilities
         attended_hosts, attention_weights = self.attention(job_embed, host_embeds, host_embeds)  # [batch, 1, hidden_size]
         
-        # Generate priorities for each host using attention-weighted host features
-        # Apply attention weights to original host embeddings
-        weighted_host_embeds = attention_weights.squeeze(1).unsqueeze(-1) * host_embeds  # [batch, num_hosts, hidden_size]
-        action_mean = torch.sigmoid(self.priority_head(weighted_host_embeds).squeeze(-1))  # [batch, num_hosts]
+        # Generate priorities combining host features and job-host attention
+        priority_scores = self.priority_head(host_embeds).squeeze(-1)  # [batch, num_hosts] - host preferences
+        attention_scores = attention_weights.squeeze(1)  # [batch, num_hosts] - job-host compatibility
+        action_mean = torch.sigmoid(priority_scores + attention_scores)  # [batch, num_hosts] - combined signal
         
         # Value estimation using attended job-host representation
         value = self.value_head(attended_hosts.squeeze(1))  # [batch, 1]

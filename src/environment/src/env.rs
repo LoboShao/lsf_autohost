@@ -130,11 +130,25 @@ impl ClusterSchedulerEnv {
                 &mut rng
             );
 
-        // Create hosts with realistic configurations
+        // Create hosts with realistic configurations and calculate min/max for normalization
         let mut hosts = Vec::with_capacity(num_hosts);
-        for i in 0..num_hosts {
+        let mut host_configs = Vec::with_capacity(num_hosts);
+        
+        // First pass: generate all host configurations
+        for _i in 0..num_hosts {
             let (cores, memory) = Self::generate_realistic_host_config(host_cores_range, host_memory_range, &mut rng);
-            hosts.push(Host::new(i, cores, memory, host_cores_range.1, host_memory_range.1));
+            host_configs.push((cores, memory));
+        }
+        
+        // Calculate actual min/max values from generated hosts
+        let actual_min_cores = host_configs.iter().map(|(c, _)| *c).min().unwrap_or(host_cores_range.0);
+        let actual_max_cores = host_configs.iter().map(|(c, _)| *c).max().unwrap_or(host_cores_range.1);
+        let actual_min_memory = host_configs.iter().map(|(_, m)| *m).min().unwrap_or(host_memory_range.0);
+        let actual_max_memory = host_configs.iter().map(|(_, m)| *m).max().unwrap_or(host_memory_range.1);
+        
+        // Second pass: create hosts with proper normalization
+        for (i, (cores, memory)) in host_configs.into_iter().enumerate() {
+            hosts.push(Host::new(i, cores, memory, actual_min_cores, actual_max_cores, actual_min_memory, actual_max_memory));
         }
         
         let host_core_utils = vec![0.0; num_hosts];
@@ -191,40 +205,47 @@ impl ClusterSchedulerEnv {
     }
     
     pub fn reset(&mut self, py: Python) -> PyResult<Py<PyArray1<f32>>> {
-        // Re-generate cluster configuration if we have original seed
+        // Re-generate cluster configuration and recalculate min/max for normalization
+        let mut host_configs = Vec::with_capacity(self.num_hosts);
+        
         if let Some(seed) = self.original_seed {
             // Use seed for deterministic host generation during testing
             let mut cluster_rng = StdRng::seed_from_u64(seed);
-            for host in &mut self.hosts {
+            for _i in 0..self.num_hosts {
                 let (cores, memory) = Self::generate_realistic_host_config(
                     self.host_cores_range, 
                     self.host_memory_range, 
                     &mut cluster_rng
                 );
-                
-                host.total_cores = cores;
-                host.total_memory = memory;
-                host.available_cores = cores;
-                host.available_memory = memory;
-                host.running_job_ids.clear();
-                host.update_normalized_values(self.host_cores_range.1, self.host_memory_range.1);
+                host_configs.push((cores, memory));
             }
         } else {
             // Use random host generation for training diversity
-            for host in &mut self.hosts {
+            for _i in 0..self.num_hosts {
                 let (cores, memory) = Self::generate_realistic_host_config(
                     self.host_cores_range, 
                     self.host_memory_range, 
                     &mut self.rng
                 );
-                
-                host.total_cores = cores;
-                host.total_memory = memory;
-                host.available_cores = cores;
-                host.available_memory = memory;
-                host.running_job_ids.clear();
-                host.update_normalized_values(self.host_cores_range.1, self.host_memory_range.1);
+                host_configs.push((cores, memory));
             }
+        }
+        
+        // Calculate actual min/max values from generated hosts
+        let actual_min_cores = host_configs.iter().map(|(c, _)| *c).min().unwrap_or(self.host_cores_range.0);
+        let actual_max_cores = host_configs.iter().map(|(c, _)| *c).max().unwrap_or(self.host_cores_range.1);
+        let actual_min_memory = host_configs.iter().map(|(_, m)| *m).min().unwrap_or(self.host_memory_range.0);
+        let actual_max_memory = host_configs.iter().map(|(_, m)| *m).max().unwrap_or(self.host_memory_range.1);
+        
+        // Apply configurations to hosts with proper normalization
+        for (i, (cores, memory)) in host_configs.into_iter().enumerate() {
+            let host = &mut self.hosts[i];
+            host.total_cores = cores;
+            host.total_memory = memory;
+            host.available_cores = cores;
+            host.available_memory = memory;
+            host.running_job_ids.clear();
+            host.update_normalized_values(actual_min_cores, actual_max_cores, actual_min_memory, actual_max_memory);
         }
 
         

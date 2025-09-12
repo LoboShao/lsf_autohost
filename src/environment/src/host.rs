@@ -10,9 +10,9 @@ pub struct Host {
     pub available_memory: u32,
     pub running_job_ids: HashMap<u32, Job>,
     
-    // Pre-calculated normalized values for efficiency
-    pub normalized_cores: f32,   // total_cores / env_max_cores
-    pub normalized_memory: f32,  // total_memory / env_max_mem
+    // Pre-calculated min-max normalized values for efficiency
+    pub normalized_cores: f32,   // (total_cores - min_cores) / (max_cores - min_cores)
+    pub normalized_memory: f32,  // (total_memory - min_memory) / (max_memory - min_memory)
     
     // Utilization history for per-second tracking (store up to 60 seconds)
     core_history: VecDeque<f32>, // Store past per-second core utilization values
@@ -20,7 +20,19 @@ pub struct Host {
 }
 
 impl Host {
-    pub fn new(id: usize, total_cores: u32, total_memory: u32, env_max_cores: u32, env_max_mem: u32) -> Self {
+    pub fn new(id: usize, total_cores: u32, total_memory: u32, env_min_cores: u32, env_max_cores: u32, env_min_mem: u32, env_max_mem: u32) -> Self {
+        let normalized_cores = if env_max_cores > env_min_cores {
+            (total_cores as f32 - env_min_cores as f32) / (env_max_cores as f32 - env_min_cores as f32)
+        } else {
+            0.0  // All hosts have same cores
+        };
+        
+        let normalized_memory = if env_max_mem > env_min_mem {
+            (total_memory as f32 - env_min_mem as f32) / (env_max_mem as f32 - env_min_mem as f32)
+        } else {
+            0.0  // All hosts have same memory
+        };
+        
         Host {
             id,
             total_cores,
@@ -28,8 +40,8 @@ impl Host {
             available_cores: total_cores,
             available_memory: total_memory,
             running_job_ids: HashMap::new(),
-            normalized_cores: total_cores as f32 / env_max_cores as f32,
-            normalized_memory: total_memory as f32 / env_max_mem as f32,
+            normalized_cores,
+            normalized_memory,
             core_history: VecDeque::new(),
             memory_history: VecDeque::new(),
         }
@@ -125,9 +137,18 @@ impl Host {
         (current_core_util, current_memory_util)
     }
     
-    pub fn update_normalized_values(&mut self, env_max_cores: u32, env_max_mem: u32) {
-        self.normalized_cores = self.total_cores as f32 / env_max_cores as f32;
-        self.normalized_memory = self.total_memory as f32 / env_max_mem as f32;
+    pub fn update_normalized_values(&mut self, env_min_cores: u32, env_max_cores: u32, env_min_mem: u32, env_max_mem: u32) {
+        self.normalized_cores = if env_max_cores > env_min_cores {
+            (self.total_cores as f32 - env_min_cores as f32) / (env_max_cores as f32 - env_min_cores as f32)
+        } else {
+            0.0  // All hosts have same cores
+        };
+        
+        self.normalized_memory = if env_max_mem > env_min_mem {
+            (self.total_memory as f32 - env_min_mem as f32) / (env_max_mem as f32 - env_min_mem as f32)
+        } else {
+            0.0  // All hosts have same memory
+        };
     }
     
     // old func for backup
