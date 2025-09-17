@@ -17,6 +17,7 @@ pub struct Job {
     pub end_time: Option<f64>,
     pub assigned_host: Option<usize>,
     pub status: JobStatus,
+    pub deferred_count: u32,  // Number of times this job has been deferred
 }
 
 impl Job {
@@ -37,6 +38,7 @@ impl Job {
             end_time: None,
             assigned_host: None,
             status: JobStatus::Pending,
+            deferred_count: 0,
         }
     }
 }

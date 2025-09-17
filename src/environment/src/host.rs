@@ -151,9 +151,4 @@ impl Host {
         };
     }
     
-    // old func for backup
-    // pub fn update_core_history(&mut self, _current_time: f32) {
-    //     self.update_utilization_history();
-    // }
-    
 }

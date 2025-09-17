@@ -29,8 +29,8 @@ class LsfEnvWrapper(gym.Env):
             dtype=np.float32
         )
         
-        # Define observation space - simplified to match training setup
-        state_size = self.num_hosts * 4 + 2
+        # Define observation space - enhanced with 7 job features  
+        state_size = self.num_hosts * 4 + 7
         self.observation_space = spaces.Box(
             low=0.0,
             high=1.0,
@@ -50,6 +50,13 @@ class LsfEnvWrapper(gym.Env):
         obs, reward, done, info = self.rust_env.step(action)
         terminated = done
         truncated = False
+        
+        # Auto-reset when episode is done (gymnasium standard behavior)
+        if terminated:
+            # Store final metrics before reset (important for testing)
+            if hasattr(self.rust_env, 'get_metrics'):
+                info['final_metrics'] = self.rust_env.get_metrics()
+            obs, _ = self.reset()
 
         return obs, reward, terminated, truncated, info
     

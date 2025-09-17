@@ -136,6 +136,13 @@ class MetricsReporter:
                 avg_episode_length = np.mean(rollout_metrics['episode_lengths'])
                 self.writer.add_scalar('Performance/Episode_Length_Avg', avg_episode_length, update_count)
 
+        # Log environment metrics collected during rollouts
+        for key, values in rollout_metrics.items():
+            if key.startswith('env_') and values:
+                avg_value = np.mean(values)
+                metric_name = key[4:]  # Remove 'env_' prefix
+                self.writer.add_scalar(f'Environment/{metric_name}', avg_value, update_count)
+
         self.training_metrics['update_count'].append(update_count)
         self.training_metrics['timesteps'].append(timesteps_collected)
         self.training_metrics['reward'].append(avg_reward)
@@ -223,21 +230,28 @@ class PPOTrainer:
             episode_return = 0.0
             episode_length = 0
             
+            final_info = None
             while not (terminated or truncated):
                 obs_tensor = torch.tensor(obs, dtype=torch.float32, device=self.device)
                 action, _, _, _ = self.policy.get_action_and_value(obs_tensor, deterministic=True)
-                obs, reward, terminated, truncated, _ = test_env.step(action.cpu().numpy())
+                obs, reward, terminated, truncated, info = test_env.step(action.cpu().numpy())
                 episode_return += reward
                 episode_length += 1
+                if terminated or truncated:
+                    final_info = info
                 
-            # Collect environment metrics
-            if hasattr(test_env, 'get_metrics'):
+            # Collect environment metrics (use final_info if available, fallback to get_metrics)
+            metrics = None
+            if final_info and 'final_metrics' in final_info:
+                metrics = final_info['final_metrics']
+            elif hasattr(test_env, 'get_metrics'):
                 metrics = test_env.get_metrics()
-                if isinstance(metrics, dict):
-                    # Add episode return to metrics
-                    metrics['episode_return'] = episode_return
-                    metrics['episode_length'] = episode_length
-                    episode_metrics.append(metrics)
+                
+            if isinstance(metrics, dict):
+                # Add episode return to metrics
+                metrics['episode_return'] = episode_return
+                metrics['episode_length'] = episode_length
+                episode_metrics.append(metrics)
             
             test_env.close()
         
@@ -245,7 +259,7 @@ class PPOTrainer:
         if episode_metrics:
             avg_metrics = {}
             for key in episode_metrics[0].keys():
-                values = [m.get(key, 0) for m in episode_metrics if key in m]
+                values = [m.get(key, 0) for m in episode_metrics if key in m and m.get(key) is not None]
                 if values:
                     avg_metrics[key] = np.mean(values)
         else:
@@ -280,21 +294,28 @@ class PPOTrainer:
             episode_return = 0.0
             episode_length = 0
             
+            final_info = None
             while not (terminated or truncated):
                 obs_tensor = torch.tensor(obs, dtype=torch.float32, device=self.device)
                 action, _, _, _ = baseline.get_action_and_value(obs_tensor)
-                obs, reward, terminated, truncated, _ = test_env.step(action.cpu().numpy())
+                obs, reward, terminated, truncated, info = test_env.step(action.cpu().numpy())
                 episode_return += reward
                 episode_length += 1
+                if terminated or truncated:
+                    final_info = info
                 
-            # Collect environment metrics
-            if hasattr(test_env, 'get_metrics'):
+            # Collect environment metrics (use final_info if available, fallback to get_metrics)
+            metrics = None
+            if final_info and 'final_metrics' in final_info:
+                metrics = final_info['final_metrics']
+            elif hasattr(test_env, 'get_metrics'):
                 metrics = test_env.get_metrics()
-                if isinstance(metrics, dict):
-                    # Add episode return to metrics
-                    metrics['episode_return'] = episode_return
-                    metrics['episode_length'] = episode_length
-                    episode_metrics.append(metrics)
+                
+            if isinstance(metrics, dict):
+                # Add episode return to metrics
+                metrics['episode_return'] = episode_return
+                metrics['episode_length'] = episode_length
+                episode_metrics.append(metrics)
             
             test_env.close()
         
@@ -302,7 +323,7 @@ class PPOTrainer:
         if episode_metrics:
             avg_metrics = {}
             for key in episode_metrics[0].keys():
-                values = [m.get(key, 0) for m in episode_metrics if key in m]
+                values = [m.get(key, 0) for m in episode_metrics if key in m and m.get(key) is not None]
                 if values:
                     avg_metrics[key] = np.mean(values)
         else:
@@ -313,8 +334,8 @@ class PPOTrainer:
     def log_metric_comparison(self, ppo_metrics: Dict, baseline_metrics: Dict, update_count: int):
         """Log comparison between PPO and baseline performance metrics"""
         # Episode return comparison
-        ppo_return = ppo_metrics['episode_return']
-        baseline_return = baseline_metrics['episode_return']
+        ppo_return = ppo_metrics.get('episode_return', 0)
+        baseline_return = baseline_metrics.get('episode_return', 0)
         self.ppo_writer.add_scalar('Comparison/Episode_Return', ppo_return, update_count)
         self.baseline_writer.add_scalar('Comparison/Episode_Return', baseline_return, update_count)
         
@@ -324,41 +345,54 @@ class PPOTrainer:
             self.writer.add_scalar('Improvement/Episode_Return_Percent', improvement, update_count)
         
         # Makespan comparison (MOST IMPORTANT for minimizing makespan)
-        ppo_makespan = ppo_metrics['makespan']
-        baseline_makespan = baseline_metrics['makespan']
-        self.ppo_writer.add_scalar('Comparison/Makespan', ppo_makespan, update_count)
-        self.baseline_writer.add_scalar('Comparison/Makespan', baseline_makespan, update_count)
-        
-        # Makespan improvement (lower is better)
-        if baseline_makespan > 0:
-            makespan_improvement = ((baseline_makespan - ppo_makespan) / baseline_makespan) * 100
-            self.writer.add_scalar('Improvement/Makespan_Reduction_Percent', makespan_improvement, update_count)
-            print(f"  Makespan - PPO: {ppo_makespan:.0f}, Baseline: {baseline_makespan:.0f}, Improvement: {makespan_improvement:.1f}%")
+        ppo_makespan = ppo_metrics.get('makespan')
+        baseline_makespan = baseline_metrics.get('makespan')
+        if ppo_makespan is not None and baseline_makespan is not None:
+            self.ppo_writer.add_scalar('Comparison/Makespan', ppo_makespan, update_count)
+            self.baseline_writer.add_scalar('Comparison/Makespan', baseline_makespan, update_count)
+            
+            # Makespan improvement (lower is better)
+            if baseline_makespan > 0:
+                makespan_improvement = ((baseline_makespan - ppo_makespan) / baseline_makespan) * 100
+                self.writer.add_scalar('Improvement/Makespan_Reduction_Percent', makespan_improvement, update_count)
+                print(f"  Makespan - PPO: {ppo_makespan:.0f}, Baseline: {baseline_makespan:.0f}, Improvement: {makespan_improvement:.1f}%")
         
         # Host core utilization comparison
-        ppo_core_util = ppo_metrics['avg_host_core_utilization']
-        baseline_core_util = baseline_metrics['avg_host_core_utilization']
+        ppo_core_util = ppo_metrics.get('avg_host_core_utilization', 0)
+        baseline_core_util = baseline_metrics.get('avg_host_core_utilization', 0)
         self.ppo_writer.add_scalar('Comparison/Host_Core_Utilization', ppo_core_util, update_count)
         self.baseline_writer.add_scalar('Comparison/Host_Core_Utilization', baseline_core_util, update_count)
         
         # Host memory utilization comparison
-        ppo_mem_util = ppo_metrics['avg_host_memory_utilization']
-        baseline_mem_util = baseline_metrics['avg_host_memory_utilization']
+        ppo_mem_util = ppo_metrics.get('avg_host_memory_utilization', 0)
+        baseline_mem_util = baseline_metrics.get('avg_host_memory_utilization', 0)
         self.ppo_writer.add_scalar('Comparison/Host_Memory_Utilization', ppo_mem_util, update_count)
         self.baseline_writer.add_scalar('Comparison/Host_Memory_Utilization', baseline_mem_util, update_count)
         
         
         # Average waiting time comparison
-        ppo_wait = ppo_metrics['avg_waiting_time']
-        baseline_wait = baseline_metrics['avg_waiting_time']
+        ppo_wait = ppo_metrics.get('avg_waiting_time', 0)
+        baseline_wait = baseline_metrics.get('avg_waiting_time', 0)
         self.ppo_writer.add_scalar('Comparison/Avg_Waiting_Time', ppo_wait, update_count)
         self.baseline_writer.add_scalar('Comparison/Avg_Waiting_Time', baseline_wait, update_count)
         
         # Average reward per step
-        ppo_avg_reward = ppo_metrics['episode_return'] / max(ppo_metrics['episode_length'], 1)
-        baseline_avg_reward = baseline_metrics['episode_return'] / max(baseline_metrics['episode_length'], 1)
+        ppo_avg_reward = ppo_metrics.get('episode_return', 0) / max(ppo_metrics.get('episode_length', 1), 1)
+        baseline_avg_reward = baseline_metrics.get('episode_return', 0) / max(baseline_metrics.get('episode_length', 1), 1)
         self.ppo_writer.add_scalar('Comparison/Avg_Reward_Per_Step', ppo_avg_reward, update_count)
         self.baseline_writer.add_scalar('Comparison/Avg_Reward_Per_Step', baseline_avg_reward, update_count)
+        
+        # Jobs completed comparison
+        ppo_jobs = ppo_metrics.get('total_jobs_completed', 0)
+        baseline_jobs = baseline_metrics.get('total_jobs_completed', 0)
+        self.ppo_writer.add_scalar('Comparison/Jobs_Completed', ppo_jobs, update_count)
+        self.baseline_writer.add_scalar('Comparison/Jobs_Completed', baseline_jobs, update_count)
+        
+        # Deferral rate comparison
+        ppo_defer = ppo_metrics.get('defer_rate', 0)
+        baseline_defer = baseline_metrics.get('defer_rate', 0)
+        self.ppo_writer.add_scalar('Comparison/Defer_Rate', ppo_defer, update_count)
+        self.baseline_writer.add_scalar('Comparison/Defer_Rate', baseline_defer, update_count)
 
     def __init__(
         self,
@@ -861,8 +895,10 @@ class PPOTrainer:
         
         # Log initial comparison
         self.log_metric_comparison(ppo_metrics, baseline_metrics, 0)
-        print(f"Initial PPO performance - Episode Return: {ppo_metrics['episode_return']:.1f}, Makespan: {ppo_metrics['makespan']:.0f}")
-        print(f"Initial Baseline performance - Episode Return: {baseline_metrics['episode_return']:.1f}, Makespan: {baseline_metrics['makespan']:.0f}")
+        ppo_makespan = ppo_metrics.get('makespan', 'N/A')
+        baseline_makespan = baseline_metrics.get('makespan', 'N/A')
+        print(f"Initial PPO performance - Episode Return: {ppo_metrics.get('episode_return', 0):.1f}, Makespan: {ppo_makespan}")
+        print(f"Initial Baseline performance - Episode Return: {baseline_metrics.get('episode_return', 0):.1f}, Makespan: {baseline_makespan}")
         
         start_time = time.time()
         
