@@ -22,19 +22,19 @@ class ThreeComponentPolicy(nn.Module):
         
         # Component-specific encoders
         self.job_encoder = nn.Sequential(
-            nn.Linear(4, 32),  # cores, memory, deferred, position
+            nn.Linear(4, 32),  # cores, memory, deferred, attempt_counter
             nn.GELU(),
             nn.Linear(32, self.hidden_size)
         )
         
         self.queue_encoder = nn.Sequential(
-            nn.Linear(3, 32),  # queue pressure, core pressure, memory pressure
+            nn.Linear(3, 32),  # queue_pressure, core_pressure, memory_pressure
             nn.GELU(),
             nn.Linear(32, self.hidden_size)
         )
         
         self.host_encoder = nn.Sequential(
-            nn.Linear(4, 32),  # core_util, memory_util, cores_norm, memory_norm
+            nn.Linear(2, 32),  # available_cores_norm, available_memory_norm
             nn.GELU(),
             nn.Linear(32, self.hidden_size)
         )
@@ -73,12 +73,12 @@ class ThreeComponentPolicy(nn.Module):
             obs = obs.unsqueeze(0)
         
         batch_size = obs.shape[0]
-        num_hosts = (obs.shape[1] - 7) // 4
+        num_hosts = (obs.shape[1] - 7) // 2
         
-        # Parse observation: [host_features[4*num_hosts], job_features[4], queue_features[3]]
-        host_features = obs[:, :num_hosts * 4].view(batch_size, num_hosts, 4)  # [batch, num_hosts, 4]
-        job_features = obs[:, -7:-3]  # [batch, 4] - cores, memory, deferred, position
-        queue_features = obs[:, -3:]  # [batch, 3] - queue pressure, core pressure, memory pressure
+        # Parse observation: [host_features[2*num_hosts], job_features[4], queue_features[3]]
+        host_features = obs[:, :num_hosts * 2].view(batch_size, num_hosts, 2)  # [batch, num_hosts, 2]
+        job_features = obs[:, -7:-3]  # [batch, 4] - cores, memory, deferred, attempt_counter
+        queue_features = obs[:, -3:]  # [batch, 3] - queue_pressure, core_pressure, memory_pressure
         
         # Encode each component separately
         host_embeds = self.host_encoder(host_features)  # [batch, num_hosts, hidden]

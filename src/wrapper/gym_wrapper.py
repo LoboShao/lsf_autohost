@@ -29,8 +29,8 @@ class LsfEnvWrapper(gym.Env):
             dtype=np.float32
         )
         
-        # Define observation space - enhanced with 7 job features  
-        state_size = self.num_hosts * 4 + 7
+        # Define observation space - simplified to 2 features per host + 7 job features
+        state_size = self.num_hosts * 2 + 7
         self.observation_space = spaces.Box(
             low=0.0,
             high=1.0,

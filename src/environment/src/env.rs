@@ -10,6 +10,14 @@ use crate::job::{Job, JobStatus};
 use crate::host::Host;
 use crate::event::CompletionEvent;
 
+// Bucket for grouping jobs with same resource requirements
+#[derive(Debug, Clone)]
+struct JobBucket {
+    cores_required: u32,
+    memory_required: u32,
+    jobs: VecDeque<Job>,
+}
+
 
 #[allow(dead_code)]
 #[pyclass]
@@ -35,11 +43,14 @@ pub struct ClusterSchedulerEnv {
     memory_util_sum: f64,               // Sum of memory utilization values  
     last_stats_update_time: u64,        // Last time statistics were updated
     job_queue: VecDeque<Job>,
-    deferred_jobs: VecDeque<Job>,     // Jobs that couldn't be scheduled, retry later
     
     // Batch scheduling mode
     batch_processing_queue: VecDeque<Job>,  // All jobs being scheduled this cycle
     current_batch_index: usize,             // Which job we're deciding on
+    
+    // Bucket scheduling (LSF-style)
+    job_buckets: Vec<JobBucket>,           // Buckets persist across cycles
+    
     active_jobs: HashMap<u32, Job>,
     completion_heap: BinaryHeap<CompletionEvent>,
     current_time: u64,  // Integer seconds only
@@ -141,15 +152,9 @@ impl ClusterSchedulerEnv {
             host_configs.push((cores, memory));
         }
         
-        // Calculate actual min/max values from generated hosts
-        let actual_min_cores = host_configs.iter().map(|(c, _)| *c).min().unwrap_or(host_cores_range.0);
-        let actual_max_cores = host_configs.iter().map(|(c, _)| *c).max().unwrap_or(host_cores_range.1);
-        let actual_min_memory = host_configs.iter().map(|(_, m)| *m).min().unwrap_or(host_memory_range.0);
-        let actual_max_memory = host_configs.iter().map(|(_, m)| *m).max().unwrap_or(host_memory_range.1);
-        
-        // Second pass: create hosts with proper normalization
+        // Create hosts from configs
         for (i, (cores, memory)) in host_configs.into_iter().enumerate() {
-            hosts.push(Host::new(i, cores, memory, actual_min_cores, actual_max_cores, actual_min_memory, actual_max_memory));
+            hosts.push(Host::new(i, cores, memory));
         }
         
         // Calculate total cluster resources
@@ -159,8 +164,8 @@ impl ClusterSchedulerEnv {
         let host_core_utils = vec![0.0; num_hosts];
         let host_memory_utils = vec![0.0; num_hosts];
         
-        // Pre-allocate cached state with correct size
-        let state_size = num_hosts * 4 + 7;
+        // Pre-allocate cached state with correct size (2 features per host + 7 job features)
+        let state_size = num_hosts * 2 + 7;
         let cached_state = vec![0.0; state_size];
         
         ClusterSchedulerEnv {
@@ -181,9 +186,9 @@ impl ClusterSchedulerEnv {
             memory_util_sum: 0.0,
             last_stats_update_time: 0,
             job_queue: VecDeque::new(),
-            deferred_jobs: VecDeque::new(),
             batch_processing_queue: VecDeque::new(),
             current_batch_index: 0,
+            job_buckets: Vec::new(),
             active_jobs: HashMap::new(),
             completion_heap: BinaryHeap::new(),
             current_time: 0,
@@ -236,11 +241,6 @@ impl ClusterSchedulerEnv {
             }
         }
         
-        // Calculate actual min/max values from generated hosts
-        let actual_min_cores = host_configs.iter().map(|(c, _)| *c).min().unwrap_or(self.host_cores_range.0);
-        let actual_max_cores = host_configs.iter().map(|(c, _)| *c).max().unwrap_or(self.host_cores_range.1);
-        let actual_min_memory = host_configs.iter().map(|(_, m)| *m).min().unwrap_or(self.host_memory_range.0);
-        let actual_max_memory = host_configs.iter().map(|(_, m)| *m).max().unwrap_or(self.host_memory_range.1);
         
         // Apply configurations to hosts with proper normalization
         for (i, (cores, memory)) in host_configs.into_iter().enumerate() {
@@ -250,7 +250,6 @@ impl ClusterSchedulerEnv {
             host.available_cores = cores;
             host.available_memory = memory;
             host.running_job_ids.clear();
-            host.update_normalized_values(actual_min_cores, actual_max_cores, actual_min_memory, actual_max_memory);
         }
         
         // Recalculate total cluster resources
@@ -259,9 +258,9 @@ impl ClusterSchedulerEnv {
         
         // Clear collections
         self.job_queue.clear();
-        self.deferred_jobs.clear();
         self.batch_processing_queue.clear();
         self.current_batch_index = 0;
+        self.job_buckets.clear();
         self.active_jobs.clear();
         self.completion_heap.clear();
         
@@ -342,7 +341,7 @@ impl ClusterSchedulerEnv {
         }
         
         // Apply scheduling decision in batch mode
-        let jobs_scheduled = if self.current_batch_index < self.batch_processing_queue.len() {
+        let _jobs_scheduled = if self.current_batch_index < self.batch_processing_queue.len() {
             let job = self.batch_processing_queue[self.current_batch_index].clone();
 
             // TODO: Adapat bucketed scheduling to avoid heavy computation on large clusters
@@ -374,20 +373,22 @@ impl ClusterSchedulerEnv {
         let total_reward = if self.current_batch_index >= self.batch_processing_queue.len() {
             self.calculate_pure_resource_utilization_reward() as f32
         } else {
-            0.0
+            -0.01
         };
+        // let total_reward = self.calculate_pure_resource_utilization_reward() as f32;
         
-        // Always move deferred jobs back to queue first (regardless of time advancement)
-        while let Some(deferred_job) = self.deferred_jobs.pop_front() {
-            self.job_queue.push_back(deferred_job);
-        }
+        // Check if all jobs have been generated (no more jobs in the pool)
+        let all_jobs_generated = self.jobs_moved_to_queue >= self.total_jobs_in_pool;
         
         // NOW advance time if needed (after reward calculation)
-        // Don't advance time if episode is already done
-        if will_advance_time && self.current_time < self.max_time as u64 {
+        // Only generate new jobs if we haven't generated all jobs yet
+        if will_advance_time && !all_jobs_generated {
             self.current_time += 1;
             // Generate NEW jobs for this new time unit (deferred jobs already moved above)
             self.add_new_jobs_to_queue();
+        } else if will_advance_time && all_jobs_generated {
+            // If all jobs are generated but we're still processing, advance time without adding jobs
+            self.current_time += 1;
         }
         
         // Move jobs from main queue to submission queue
@@ -395,16 +396,17 @@ impl ClusterSchedulerEnv {
         
         self.current_step += 1;
         
-        // Episode ends when current time equals max time
+        // Episode ends when max_time is reached (original behavior)
         let done = self.current_time >= self.max_time as u64;
         
-        // Set makespan only when all jobs are truly finished
-        let all_jobs_finished = self.active_jobs.is_empty() && 
-                               self.job_queue.is_empty() && 
-                               self.batch_processing_queue.is_empty() &&
-                               self.deferred_jobs.is_empty();
+        // Still track if all jobs finished for metrics
+        // let all_jobs_finished = self.active_jobs.is_empty() && 
+        //                        self.job_queue.is_empty() && 
+        //                        self.batch_processing_queue.is_empty() &&
+        //                        self.job_buckets.is_empty();
         
-        if done && all_jobs_finished && self.makespan.is_none() {
+        // Set makespan when episode actually ends
+        if done && self.makespan.is_none() {
             self.makespan = Some(self.current_time);
         }
         
@@ -420,17 +422,21 @@ impl ClusterSchedulerEnv {
         // Clear the cached state (already pre-allocated with correct size)
         self.cached_state.fill(0.0);
         
-        // Fill state in format: [host1_core_util, host1_mem_util, host1_cores_norm, host1_mem_norm, ...]
+        // Fill state in format: [host1_avail_cores_norm, host1_avail_mem_norm, host2_avail_cores_norm, ...]
+        // Using available resources normalized by environment max values
+        let max_cores = self.host_cores_range.1 as f32;
+        let max_memory = self.host_memory_range.1 as f32;
+        
         for i in 0..self.num_hosts {
-            let base_idx = i * 4;
-            self.cached_state[base_idx] = self.host_core_utils[i];     // Host core utilization in last second (LSF accessible)
-            self.cached_state[base_idx + 1] = self.host_memory_utils[i];    // Host memory utilization in last second (LSF accessible)
-            self.cached_state[base_idx + 2] = self.hosts[i].normalized_cores;  // Pre-calculated normalized cores
-            self.cached_state[base_idx + 3] = self.hosts[i].normalized_memory; // Pre-calculated normalized memory
+            let base_idx = i * 2;
+            // Normalized available cores (0 = no cores available, 1 = max possible cores available)
+            self.cached_state[base_idx] = self.hosts[i].available_cores as f32 / max_cores;
+            // Normalized available memory (0 = no memory available, 1 = max possible memory available)
+            self.cached_state[base_idx + 1] = self.hosts[i].available_memory as f32 / max_memory;
         }
         
         // Enhanced job info (7 features) - at end of state vector
-        let job_batch_idx = self.num_hosts * 4;
+        let job_batch_idx = self.num_hosts * 2;
         
         if self.current_batch_index < self.batch_processing_queue.len() {
             let job = &self.batch_processing_queue[self.current_batch_index];
@@ -444,15 +450,27 @@ impl ClusterSchedulerEnv {
             // 3. Is deferred (explicit tracking of jobs returned to queue)
             self.cached_state[job_batch_idx + 2] = if job.deferred_count > 0 { 1.0 } else { 0.0 };
             
-            // 4. Queue pressure (jobs in current scheduling cycle / 100)
+            // 4. Jobs processed counter - using tanh with sqrt(num_hosts) scaling
+            // This represents how many scheduling decisions we've made this batch
+            // sqrt(num_hosts) is a natural scale - represents trying multiple hosts
+            let jobs_processed = self.current_batch_index as f32;
+            let scale_factor = (self.num_hosts as f32).sqrt().max(1.0);
+            self.cached_state[job_batch_idx + 3] = (jobs_processed / scale_factor).tanh();
+            
+            // Queue features start at index 4
+            // 5. Queue pressure - using tanh with num_hosts as natural scale
+            // num_hosts represents one round of scheduling capacity
+            // tanh gives smooth saturation: queue=num_hosts → 0.76, queue=2*num_hosts → 0.96
             let jobs_in_cycle = if !self.batch_processing_queue.is_empty() {
                 self.batch_processing_queue.len()
             } else {
-                self.job_queue.len() + self.deferred_jobs.len()
+                // Count jobs in queue plus jobs in buckets (includes deferred)
+                self.job_queue.len() + self.job_buckets.iter().map(|b| b.jobs.len()).sum::<usize>()
             };
-            self.cached_state[job_batch_idx + 3] = (jobs_in_cycle as f32) / 100.0;
+            let queue_scale = self.num_hosts as f32;
+            self.cached_state[job_batch_idx + 4] = (jobs_in_cycle as f32 / queue_scale).tanh();
             
-            // 5. Calculate total resource pressure for all jobs
+            // Calculate total resource pressure for all jobs
             let mut total_cores_needed = 0u32;
             let mut total_memory_needed = 0u32;
             
@@ -468,23 +486,20 @@ impl ClusterSchedulerEnv {
                     total_cores_needed += queue_job.cores_required;
                     total_memory_needed += queue_job.memory_required;
                 }
-                for queue_job in &self.deferred_jobs {
-                    total_cores_needed += queue_job.cores_required;
-                    total_memory_needed += queue_job.memory_required;
+                // Include jobs in buckets (deferred and waiting)
+                for bucket in &self.job_buckets {
+                    for queue_job in &bucket.jobs {
+                        total_cores_needed += queue_job.cores_required;
+                        total_memory_needed += queue_job.memory_required;
+                    }
                 }
             }
             
-            // 5. Core pressure ratio 
-            self.cached_state[job_batch_idx + 4] = (total_cores_needed as f32) / (self.total_cluster_cores as f32);
+            // 6. Core pressure ratio 
+            self.cached_state[job_batch_idx + 5] = (total_cores_needed as f32) / (self.total_cluster_cores as f32);
             
-            // 6. Memory pressure ratio
-            self.cached_state[job_batch_idx + 5] = (total_memory_needed as f32) / (self.total_cluster_memory as f32);
-            
-            // 7. Scaled job attempt counter (logarithmic scaling for LSF compatibility)
-            // Uses log(1 + attempts) / log(1 + 100) to handle unknown queue lengths
-            // Maps: 0→0, 10→0.48, 50→0.81, 100→1.0, 200→1.09
-            let attempts = self.current_batch_index as f32;
-            self.cached_state[job_batch_idx + 6] = (1.0 + attempts).ln() / (1.0 + 100.0).ln();
+            // 7. Memory pressure ratio
+            self.cached_state[job_batch_idx + 6] = (total_memory_needed as f32) / (self.total_cluster_memory as f32);
         }
   
         Ok(PyArray1::from_slice(py, &self.cached_state).to_owned())
@@ -505,7 +520,7 @@ impl ClusterSchedulerEnv {
         info.set_item("total_jobs_completed", self.total_jobs_completed)?;
         info.set_item("current_time", self.current_time)?;
         info.set_item("current_step", self.current_step)?;
-        info.set_item("deferred_jobs", self.deferred_jobs.len())?;
+        info.set_item("deferred_jobs", self.count_deferred_jobs())?;
         info.set_item("total_jobs_deferred", self.total_jobs_deferred)?;
         
         // Add makespan if available
@@ -561,8 +576,8 @@ impl ClusterSchedulerEnv {
     
     pub fn get_metrics(&self, py: Python) -> PyResult<PyObject> {
         
-        // Normalize by episode duration (600s) for fair comparison between policies
-        let episode_duration = self.max_time as f64; // Always 600 seconds
+        // Use actual episode duration (current_time) since episodes now run until completion
+        let episode_duration = self.current_time.max(1) as f64; // Actual seconds elapsed
         let avg_core_util = (self.core_util_sum / episode_duration) as f32;
         
         let avg_memory_util = (self.memory_util_sum / episode_duration) as f32;
@@ -576,11 +591,6 @@ impl ClusterSchedulerEnv {
             0.0
         };
         
-        let completion_rate = if self.total_jobs_generated > 0 {
-            self.total_jobs_completed as f64 / self.total_jobs_generated as f64
-        } else {
-            0.0
-        };
         
         
         let metrics = PyDict::new(py);
@@ -599,9 +609,12 @@ impl ClusterSchedulerEnv {
             total_current_waiting_time += waiting_time;
         }
         
-        for job in &self.deferred_jobs {
-            let waiting_time = self.current_time as f64 - job.submission_time;
-            total_current_waiting_time += waiting_time;
+        // Add waiting time for jobs in buckets (includes deferred)
+        for bucket in &self.job_buckets {
+            for job in &bucket.jobs {
+                let waiting_time = self.current_time as f64 - job.submission_time;
+                total_current_waiting_time += waiting_time;
+            }
         }
         
         // Total waiting time = completed jobs + currently waiting jobs
@@ -641,7 +654,9 @@ impl ClusterSchedulerEnv {
         queue_states.set_item("job_queue_length", self.job_queue.len())?;
         queue_states.set_item("batch_queue_length", self.batch_processing_queue.len())?;
         queue_states.set_item("current_batch_index", self.current_batch_index)?;
-        queue_states.set_item("deferred_jobs_length", self.deferred_jobs.len())?;
+        queue_states.set_item("deferred_jobs_length", self.count_deferred_jobs())?;
+        queue_states.set_item("num_buckets", self.job_buckets.len())?;
+        queue_states.set_item("total_jobs_in_buckets", self.job_buckets.iter().map(|b| b.jobs.len()).sum::<usize>())?;
         queue_states.set_item("active_jobs_count", self.active_jobs.len())?;
         
         // Current time info
@@ -677,7 +692,8 @@ impl ClusterSchedulerEnv {
         viz_dict.set_item("job_queue_length", self.job_queue.len())?;
         viz_dict.set_item("batch_queue_length", self.batch_processing_queue.len())?;
         viz_dict.set_item("current_batch_index", self.current_batch_index)?;
-        viz_dict.set_item("deferred_jobs_length", self.deferred_jobs.len())?;
+        viz_dict.set_item("deferred_jobs_length", self.count_deferred_jobs())?;
+        viz_dict.set_item("num_buckets", self.job_buckets.len())?;
         
         // Decision state
         viz_dict.set_item("needs_decision", self.current_batch_index < self.batch_processing_queue.len())?;
@@ -686,7 +702,7 @@ impl ClusterSchedulerEnv {
         let all_jobs_generated = self.current_time >= self.max_time as u64;
         let no_pending_work = self.job_queue.is_empty() && 
                              self.batch_processing_queue.is_empty() && 
-                             self.deferred_jobs.is_empty() && 
+                             self.job_buckets.is_empty() && 
                              self.active_jobs.is_empty();
         let episode_done = all_jobs_generated && no_pending_work;
         viz_dict.set_item("episode_done", episode_done)?;
@@ -736,8 +752,13 @@ impl ClusterSchedulerEnv {
             
             // Generate properties for jobs arriving at this timestep
             for _job in 0..num_jobs {
-                job_cores_schedule.push(cores_dist.sample(rng));
-                job_memory_schedule.push(Self::generate_realistic_job_memory(job_memory_range, rng));
+                let cores = cores_dist.sample(rng);
+                job_cores_schedule.push(cores);
+                
+                // Generate memory with correlation to cores (EDA job patterns)
+                let memory = Self::generate_correlated_job_memory(cores, job_cores_range, job_memory_range, rng);
+                job_memory_schedule.push(memory);
+                
                 job_duration_schedule.push(duration_dist.sample(rng));
             }
         }
@@ -799,6 +820,66 @@ impl ClusterSchedulerEnv {
         };
         
         (cores, memory_mb)
+    }
+    
+    fn generate_correlated_job_memory(
+        cores: u32,
+        cores_range: (u32, u32),
+        memory_range: (u32, u32),
+        rng: &mut StdRng
+    ) -> u32 {
+        // EDA job patterns show correlation between cores and memory
+        // Memory is always in multiples of 1024 MB (1 GB)
+        
+        // Normalize cores to 0-1 range
+        let cores_norm = (cores - cores_range.0) as f32 / (cores_range.1 - cores_range.0).max(1) as f32;
+        
+        // Determine job type probabilistically
+        let job_type_roll = rng.gen::<f32>();
+        
+        // Convert memory range to GB units for easier calculation
+        let min_gb = (memory_range.0 / 1024).max(1);
+        let max_gb = memory_range.1 / 1024;
+        
+        let memory_gb = if cores_norm < 0.2 {
+            // Low core jobs (bottom 20% of core range)
+            if job_type_roll < 0.6 {
+                // 60%: Small compile/lint jobs - low memory
+                // Use 5-20% of memory range
+                let mem_fraction = rng.gen_range(0.05..0.2);
+                let gb = min_gb + ((max_gb - min_gb) as f32 * mem_fraction) as u32;
+                gb.max(min_gb).min(max_gb)
+            } else if job_type_roll < 0.85 {
+                // 25%: Memory-intensive timing/analysis - high memory, few cores  
+                // Use 50-90% of memory range
+                let mem_fraction = rng.gen_range(0.5..0.9);
+                let gb = min_gb + ((max_gb - min_gb) as f32 * mem_fraction) as u32;
+                gb.max(min_gb).min(max_gb)
+            } else {
+                // 15%: Medium synthesis - moderate memory
+                // Use 20-40% of memory range
+                let mem_fraction = rng.gen_range(0.2..0.4);
+                let gb = min_gb + ((max_gb - min_gb) as f32 * mem_fraction) as u32;
+                gb.max(min_gb).min(max_gb)
+            }
+        } else if cores_norm < 0.6 {
+            // Medium core jobs (20-60% of core range): typically P&R or simulation
+            // Use 30-60% of memory range
+            let mem_fraction = rng.gen_range(0.3..0.6);
+            let gb = min_gb + ((max_gb - min_gb) as f32 * mem_fraction) as u32;
+            gb.max(min_gb).min(max_gb)
+        } else {
+            // High core jobs (top 40% of core range): large P&R or parallel verification
+            // Use 40-80% of memory range (scales with cores but not linearly)
+            let base_fraction = 0.4 + cores_norm * 0.3; // 0.4 to 0.7 based on cores
+            let noise = rng.gen_range(-0.1..0.1);
+            let mem_fraction = (base_fraction + noise).max(0.4).min(0.8);
+            let gb = min_gb + ((max_gb - min_gb) as f32 * mem_fraction) as u32;
+            gb.max(min_gb).min(max_gb)
+        };
+        
+        // Convert back to MB (always multiple of 1024)
+        memory_gb * 1024
     }
     
     fn generate_realistic_job_memory(memory_range: (u32, u32), rng: &mut StdRng) -> u32 {
@@ -877,16 +958,46 @@ impl ClusterSchedulerEnv {
     }
     
     fn start_batch_processing(&mut self) {
-        // Move all jobs (new + deferred) to batch processing queue
+        // Add new jobs from job_queue to buckets
         while let Some(job) = self.job_queue.pop_front() {
-            self.batch_processing_queue.push_back(job);
-        }
-        while let Some(job) = self.deferred_jobs.pop_front() {
-            self.batch_processing_queue.push_back(job);
+            self.add_job_to_bucket(job);
         }
         
+        // Build batch processing queue from buckets (in bucket creation order)
+        // This includes both new and deferred jobs, maintaining FCFS within each bucket
+        self.batch_processing_queue.clear();
+        for bucket in &self.job_buckets {
+            for job in &bucket.jobs {
+                self.batch_processing_queue.push_back(job.clone());
+            }
+        }
         
         self.current_batch_index = 0;
+    }
+    
+    fn add_job_to_bucket(&mut self, job: Job) {
+        // Find existing bucket or create new one
+        let bucket_idx = self.job_buckets.iter().position(|b| 
+            b.cores_required == job.cores_required && 
+            b.memory_required == job.memory_required
+        );
+        
+        match bucket_idx {
+            Some(idx) => {
+                // Add to existing bucket (maintains FCFS within bucket)
+                self.job_buckets[idx].jobs.push_back(job);
+            }
+            None => {
+                // Create new bucket at the end (maintains creation order)
+                let mut new_bucket = JobBucket {
+                    cores_required: job.cores_required,
+                    memory_required: job.memory_required,
+                    jobs: VecDeque::new(),
+                };
+                new_bucket.jobs.push_back(job);
+                self.job_buckets.push(new_bucket);
+            }
+        }
     }
     
     fn add_new_jobs_to_queue(&mut self) {
@@ -1000,6 +1111,17 @@ impl ClusterSchedulerEnv {
         // Clear batch and reset index
         self.batch_processing_queue.clear();
         self.current_batch_index = 0;
+        
+        // Remove empty buckets (all jobs in that bucket successfully scheduled)
+        self.job_buckets.retain(|bucket| !bucket.jobs.is_empty());
+    }
+    
+    fn count_deferred_jobs(&self) -> usize {
+        // Count all jobs in buckets that have been deferred at least once
+        self.job_buckets.iter()
+            .flat_map(|bucket| &bucket.jobs)
+            .filter(|job| job.deferred_count > 0)
+            .count()
     }
     
     fn schedule_single_job_from_batch(&mut self, job: Job, action: &[f64]) -> usize {
@@ -1046,17 +1168,37 @@ impl ClusterSchedulerEnv {
                         job_id,
                     });
                     
+                    // Remove the job from its bucket since it's scheduled
+                    for bucket in &mut self.job_buckets {
+                        if bucket.cores_required == job.cores_required && 
+                           bucket.memory_required == job.memory_required {
+                            bucket.jobs.retain(|j| j.id != job_id);
+                            break;
+                        }
+                    }
+                    
                     self.active_jobs.insert(job_id, job_to_schedule);
                     return 1; // Successfully scheduled one job
                 }
             }
         }
         
-        // Put unscheduled job to deferred queue - will be retried after time advances
-        let mut deferred_job = job;
-        deferred_job.deferred_count += 1;
-        self.total_jobs_deferred += 1;  // Track total deferral events
-        self.deferred_jobs.push_back(deferred_job);
+        // Job couldn't be scheduled - update deferred count in the bucket
+        // Find the job in its bucket and update its deferred count
+        for bucket in &mut self.job_buckets {
+            if bucket.cores_required == job.cores_required && 
+               bucket.memory_required == job.memory_required {
+                // Find the job in this bucket
+                for bucket_job in &mut bucket.jobs {
+                    if bucket_job.id == job.id {
+                        bucket_job.deferred_count += 1;
+                        self.total_jobs_deferred += 1;
+                        break;
+                    }
+                }
+                break;
+            }
+        }
         
         0 // No job scheduled
     }

@@ -17,12 +17,12 @@ def parse_args():
     
     # Environment args - OPTIMIZED FOR JOB CYCLES  
     parser.add_argument('--num-hosts', type=int, default=30, help='Number of hosts in the cluster')
-    parser.add_argument('--episode-length', type=int, default=600, help='Episode length in steps (matches rollout steps)')
+    parser.add_argument('--episode-length', type=int, default=500, help='Episode length in steps (matches rollout steps)')
     parser.add_argument('--max-jobs-per-step', type=int, default=3, help='Maximum jobs per step - much higher load for resource pressure')
     parser.add_argument('--max-queue-length', type=int, default=100*100, help='Maximum queue length')
     
     # Host/Job resource ranges - INCREASED LOAD FOR SCHEDULING PRESSURE
-    parser.add_argument('--host-cores-min', type=int, default=16, help='Minimum host cores')
+    parser.add_argument('--host-cores-min', type=int, default=32, help='Minimum host cores')
     parser.add_argument('--host-cores-max', type=int, default=64, help='Maximum host cores')
     parser.add_argument('--host-memory-min', type=int, default=32*1024, help='Minimum host memory (MB)')
     parser.add_argument('--host-memory-max', type=int, default=64*1024, help='Maximum host memory (MB)')
@@ -30,23 +30,23 @@ def parse_args():
     parser.add_argument('--job-cores-max', type=int, default=8, help='Maximum job cores - larger synthesis/PnR jobs')
     parser.add_argument('--job-memory-min', type=int, default=1*1024, help='Minimum job memory (MB) - 4GB realistic minimum')
     parser.add_argument('--job-memory-max', type=int, default=8*1024, help='Maximum job memory (MB) - 16GB for larger jobs')
-    parser.add_argument('--job-duration-min', type=int, default=20, help='Minimum job duration (seconds) - shorter for more turnover')
+    parser.add_argument('--job-duration-min', type=int, default=30, help='Minimum job duration (seconds) - shorter for more turnover')
     parser.add_argument('--job-duration-max', type=int, default=300, help='Maximum job duration (seconds) - moderate length jobs')
     
     # Training args - OPTIMIZED FOR BATCH REWARDS & JOB CYCLES
     # Formula: total_timesteps = rollout_steps × num_envs × num_updates
     # Default: 4096 × 3 × 4096 = 33,554,432 timesteps (~2048 updates)
-    parser.add_argument('--total-timesteps', type=int, default=4096*3*4096, help='Total training timesteps: rollout_steps × num_envs × num_updates')
+    parser.add_argument('--total-timesteps', type=int, default=4096*4*4096, help='Total training timesteps: rollout_steps × num_envs × num_updates')
     parser.add_argument('--rollout-steps', type=int, default=4096, help='Longer rollouts for sparse rewards - complete episodes')
-    parser.add_argument('--lr', type=float, default=3e-4, help='Lower learning rate for sparse reward stability')
-    parser.add_argument('--gamma', type=float, default=0.995, help='Higher discount factor for sparse rewards')
+    parser.add_argument('--lr', type=float, default=1e-5, help='Lower learning rate for sparse reward stability')
+    parser.add_argument('--gamma', type=float, default=0.99, help='Higher discount factor for sparse rewards')
     parser.add_argument('--lam', type=float, default=0.99, help='Higher GAE lambda for sparse rewards')
-    parser.add_argument('--clip-coef', type=float, default=0.2, help='Lower clip coefficient for stability')
-    parser.add_argument('--ent-coef', type=float, default=0.01, help='Entropy coefficient - higher for exploration')
-    parser.add_argument('--vf-coef', type=float, default=2.0, help='Higher value function weight for sparse rewards')
-    parser.add_argument('--update-epochs', type=int, default=2, help='More epochs to learn from sparse signals')
-    parser.add_argument('--minibatch-size', type=int, default=512, help='Smaller minibatches for more updates')
-    parser.add_argument('--buffer-size', type=int, default=4096, help='Rollout buffer size - MATCHES ROLLOUT STEPS')
+    parser.add_argument('--clip-coef', type=float, default=0.1, help='Lower clip coefficient for stability')
+    parser.add_argument('--ent-coef', type=float, default=0.025, help='Entropy coefficient - higher for exploration')
+    parser.add_argument('--vf-coef', type=float, default=5.0, help='Higher value function weight for sparse rewards')
+    parser.add_argument('--update-epochs', type=int, default=5, help='More epochs to learn from sparse signals')
+    parser.add_argument('--minibatch-size', type=int, default=258, help='Smaller minibatches for more updates')
+    parser.add_argument('--buffer-size', type=int, default=2048, help='Rollout buffer size - MATCHES ROLLOUT STEPS')
 
     # System args
     parser.add_argument('--device', type=str, default='cpu', help='Device to use (auto, cpu, cuda, mps) - cpu is fastest for small models')
@@ -56,20 +56,20 @@ def parse_args():
     parser.add_argument('--save-model', type=str, default=None, help='Path to save the trained model')
     
     # Advanced RL techniques
-    parser.add_argument('--lr-schedule', type=str, default='cosine', 
+    parser.add_argument('--lr-schedule', type=str, default='linear', 
                        choices=['constant', 'linear', 'exponential', 'cosine', 'warmup_cosine'],
                        help='Learning rate schedule')
     parser.add_argument('--lr-decay-factor', type=float, default=0.995, help='Learning rate decay factor for exponential schedule')
-    parser.add_argument('--lr-warmup-steps', type=int, default=100, help='Warmup steps for warmup schedules')
+    parser.add_argument('--lr-warmup-steps', type=int, default=200, help='Warmup steps for warmup schedules')
     parser.add_argument('--early-stopping-patience', type=int, default=200, help='Early stopping patience - reasonable for longer training')
     parser.add_argument('--early-stopping-threshold', type=float, default=0.01, help='Early stopping improvement threshold')
     parser.add_argument('--value-norm-decay', type=float, default=0.99, help='Value normalization decay factor')
-    parser.add_argument('--log-dir', type=str, default="exp6", help='Log directory for TensorBoard logs, checkpoints, and test data')
+    parser.add_argument('--log-dir', type=str, default="exp3", help='Log directory for TensorBoard logs, checkpoints, and test data')
     parser.add_argument('--save-freq', type=int, default=250, help='Checkpoint save frequency - more frequent for experiments')
     parser.add_argument('--resume-from', type=str, default=None, help='Resume training from checkpoint')
-    parser.add_argument('--exploration-noise-decay', type=float, default=0.998, help='Exploration noise decay factor - slower decay')
+    parser.add_argument('--exploration-noise-decay', type=float, default=0.999, help='Exploration noise decay factor - slower decay')
     parser.add_argument('--min-exploration-noise', type=float, default=0.1, help='Minimum exploration noise')
-    parser.add_argument('--num-envs', type=int, default=3, help='Number of parallel environments - more for better sampling')
+    parser.add_argument('--num-envs', type=int, default=4, help='Number of parallel environments - more for better sampling')
     
     return parser.parse_args()
 
