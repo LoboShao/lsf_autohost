@@ -38,14 +38,14 @@ def parse_args():
     # Default: 4096 × 3 × 4096 = 33,554,432 timesteps (~2048 updates)
     parser.add_argument('--total-timesteps', type=int, default=4096*4*4096, help='Total training timesteps: rollout_steps × num_envs × num_updates')
     parser.add_argument('--rollout-steps', type=int, default=4096, help='Longer rollouts for sparse rewards - complete episodes')
-    parser.add_argument('--lr', type=float, default=1e-5, help='Lower learning rate for sparse reward stability')
+    parser.add_argument('--lr', type=float, default=5e-6, help='Lower learning rate for sparse reward stability')
     parser.add_argument('--gamma', type=float, default=0.99, help='Higher discount factor for sparse rewards')
     parser.add_argument('--lam', type=float, default=0.99, help='Higher GAE lambda for sparse rewards')
     parser.add_argument('--clip-coef', type=float, default=0.1, help='Lower clip coefficient for stability')
     parser.add_argument('--ent-coef', type=float, default=0.025, help='Entropy coefficient - higher for exploration')
     parser.add_argument('--vf-coef', type=float, default=5.0, help='Higher value function weight for sparse rewards')
-    parser.add_argument('--update-epochs', type=int, default=5, help='More epochs to learn from sparse signals')
-    parser.add_argument('--minibatch-size', type=int, default=258, help='Smaller minibatches for more updates')
+    parser.add_argument('--update-epochs', type=int, default=2, help='More epochs to learn from sparse signals')
+    parser.add_argument('--minibatch-size', type=int, default=512, help='Smaller minibatches for more updates')
     parser.add_argument('--buffer-size', type=int, default=2048, help='Rollout buffer size - MATCHES ROLLOUT STEPS')
 
     # System args
@@ -64,12 +64,13 @@ def parse_args():
     parser.add_argument('--early-stopping-patience', type=int, default=200, help='Early stopping patience - reasonable for longer training')
     parser.add_argument('--early-stopping-threshold', type=float, default=0.01, help='Early stopping improvement threshold')
     parser.add_argument('--value-norm-decay', type=float, default=0.99, help='Value normalization decay factor')
-    parser.add_argument('--log-dir', type=str, default="exp3", help='Log directory for TensorBoard logs, checkpoints, and test data')
+    parser.add_argument('--log-dir', type=str, default="exp1", help='Log directory for TensorBoard logs, checkpoints, and test data')
     parser.add_argument('--save-freq', type=int, default=250, help='Checkpoint save frequency - more frequent for experiments')
     parser.add_argument('--resume-from', type=str, default=None, help='Resume training from checkpoint')
-    parser.add_argument('--exploration-noise-decay', type=float, default=0.999, help='Exploration noise decay factor - slower decay')
-    parser.add_argument('--min-exploration-noise', type=float, default=0.1, help='Minimum exploration noise')
+    parser.add_argument('--exploration-noise-decay', type=float, default=0.995, help='Exploration noise decay factor - slower decay')
+    parser.add_argument('--min-exploration-noise', type=float, default=0.02, help='Minimum exploration noise')
     parser.add_argument('--num-envs', type=int, default=4, help='Number of parallel environments - more for better sampling')
+    parser.add_argument('--test-seeds', type=int, nargs='+', default=[42, 43, 44], help='Seeds to use for deterministic testing (e.g., --test-seeds 42 43 44)')
     
     return parser.parse_args()
 
@@ -187,7 +188,8 @@ def main():
         early_stopping_threshold=args.early_stopping_threshold,
         value_norm_decay=args.value_norm_decay,
         checkpoint_dir=checkpoint_dir,
-        save_freq=args.save_freq
+        save_freq=args.save_freq,
+        test_seeds=args.test_seeds
     )
     
     # Resume from checkpoint if specified

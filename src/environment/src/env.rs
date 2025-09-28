@@ -447,8 +447,13 @@ impl ClusterSchedulerEnv {
             // 2. Job memory normalized
             self.cached_state[job_batch_idx + 1] = job.memory_required as f32 / self.job_memory_range.1 as f32;
             
-            // 3. Is deferred (explicit tracking of jobs returned to queue)
-            self.cached_state[job_batch_idx + 2] = if job.deferred_count > 0 { 1.0 } else { 0.0 };
+            // 3. Normalized waiting time - using tanh with 60 second scale
+            // This implicitly captures deferred status: deferred jobs have longer waiting times
+            let current_waiting_time = self.current_time as f32 - job.submission_time as f32;
+            // tanh scale: wait=0→0, wait=30→0.46, wait=60→0.76, wait=120→0.96
+            // Jobs waiting >60s are considered significantly delayed
+            let patience_scale = 60.0;
+            self.cached_state[job_batch_idx + 2] = (current_waiting_time / patience_scale).tanh();
             
             // 4. Jobs processed counter - using tanh with sqrt(num_hosts) scaling
             // This represents how many scheduling decisions we've made this batch
@@ -572,6 +577,16 @@ impl ClusterSchedulerEnv {
         schedule_dict.set_item("job_duration_range", self.job_duration_range)?;
         
         Ok(schedule_dict.to_object(py))
+    }
+    
+    pub fn get_cluster_info(&self, py: Python) -> PyResult<PyObject> {
+        let info_dict = pyo3::types::PyDict::new(py);
+        info_dict.set_item("total_cluster_cores", self.total_cluster_cores)?;
+        info_dict.set_item("total_cluster_memory", self.total_cluster_memory)?;
+        info_dict.set_item("num_hosts", self.num_hosts)?;
+        info_dict.set_item("host_cores_range", self.host_cores_range)?;
+        info_dict.set_item("host_memory_range", self.host_memory_range)?;
+        Ok(info_dict.to_object(py))
     }
     
     pub fn get_metrics(&self, py: Python) -> PyResult<PyObject> {

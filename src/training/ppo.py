@@ -214,6 +214,7 @@ class PPOTrainer:
             
         self.policy.eval()
         episode_metrics = []
+        seed_to_metrics = {}  # Store per-seed metrics
         
         if self.is_vectorized:
             train_env = self.env.envs[0]
@@ -223,6 +224,16 @@ class PPOTrainer:
         for ep in range(num_episodes):
             seed = test_seeds[ep % len(test_seeds)]
             test_env = train_env.create_test_env(seed)
+            
+            # Get and print cluster information (only on first test)
+            if hasattr(test_env, 'get_cluster_info') and update_count == 0:
+                cluster_info = test_env.get_cluster_info()
+                print(f"\n[TEST {policy_name}] Cluster Info for seed {seed}:")
+                print(f"  Total Cluster Cores: {cluster_info.get('total_cluster_cores', 'N/A')}")
+                print(f"  Total Cluster Memory: {cluster_info.get('total_cluster_memory', 'N/A')} MB")
+                print(f"  Number of Hosts: {cluster_info.get('num_hosts', 'N/A')}")
+                print(f"  Host Cores Range: {cluster_info.get('host_cores_range', 'N/A')}")
+                print(f"  Host Memory Range: {cluster_info.get('host_memory_range', 'N/A')} MB")
             
             obs, _ = test_env.reset()
             terminated = False
@@ -252,6 +263,7 @@ class PPOTrainer:
                 metrics['episode_return'] = episode_return
                 metrics['episode_length'] = episode_length
                 episode_metrics.append(metrics)
+                seed_to_metrics[seed] = metrics.copy()  # Store per-seed metrics
             
             test_env.close()
         
@@ -265,8 +277,14 @@ class PPOTrainer:
         else:
             avg_metrics = {}
         
+        # Return both average and per-seed metrics
+        result = {
+            'average': avg_metrics,
+            'per_seed': seed_to_metrics
+        }
+        
         self.policy.train()
-        return avg_metrics
+        return result
 
     @torch.inference_mode()
     def test_baseline_with_metrics(self, num_episodes: int = 1, update_count: int = 0, 
@@ -283,6 +301,7 @@ class PPOTrainer:
         num_hosts = train_env.num_hosts
         baseline = FirstAvailableBaseline(num_hosts)
         episode_metrics = []
+        seed_to_metrics = {}  # Store per-seed metrics
         
         for ep in range(num_episodes):
             seed = test_seeds[ep % len(test_seeds)]
@@ -316,6 +335,7 @@ class PPOTrainer:
                 metrics['episode_return'] = episode_return
                 metrics['episode_length'] = episode_length
                 episode_metrics.append(metrics)
+                seed_to_metrics[seed] = metrics.copy()  # Store per-seed metrics
             
             test_env.close()
         
@@ -329,70 +349,152 @@ class PPOTrainer:
         else:
             avg_metrics = {}
         
-        return avg_metrics
+        # Return both average and per-seed metrics
+        result = {
+            'average': avg_metrics,
+            'per_seed': seed_to_metrics
+        }
+        
+        return result
 
     def log_metric_comparison(self, ppo_metrics: Dict, baseline_metrics: Dict, update_count: int):
         """Log comparison between PPO and baseline performance metrics"""
+        
+        # Extract average and per-seed metrics
+        ppo_avg = ppo_metrics.get('average', ppo_metrics)  # Backward compatibility
+        baseline_avg = baseline_metrics.get('average', baseline_metrics)
+        ppo_per_seed = ppo_metrics.get('per_seed', {})
+        baseline_per_seed = baseline_metrics.get('per_seed', {})
+        
+        # Log per-seed metrics
+        if ppo_per_seed and baseline_per_seed:
+            seeds = list(ppo_per_seed.keys())
+            print(f"\n[Test Results - Update {update_count}]")
+            print("=" * 60)
+            
+            # Log per-seed average waiting time and jobs completed
+            for seed in seeds:
+                ppo_seed_metrics = ppo_per_seed.get(seed, {})
+                baseline_seed_metrics = baseline_per_seed.get(seed, {})
+                
+                # Average waiting time per seed
+                ppo_wait = ppo_seed_metrics.get('avg_waiting_time', 0)
+                baseline_wait = baseline_seed_metrics.get('avg_waiting_time', 0)
+                self.ppo_writer.add_scalar(f'Comparison_Seed_{seed}/Avg_Waiting_Time', ppo_wait, update_count)
+                self.baseline_writer.add_scalar(f'Comparison_Seed_{seed}/Avg_Waiting_Time', baseline_wait, update_count)
+                
+                # Calculate waiting time improvement (lower is better)
+                if baseline_wait > 0:
+                    wait_improvement = ((baseline_wait - ppo_wait) / baseline_wait) * 100
+                    self.writer.add_scalar(f'Improvement_Seed_{seed}/Waiting_Time_Reduction_Percent', wait_improvement, update_count)
+                    print(f"  Seed {seed} Avg Waiting Time: PPO={ppo_wait:.1f}, Baseline={baseline_wait:.1f}, Improvement={wait_improvement:.1f}%")
+                else:
+                    print(f"  Seed {seed} Avg Waiting Time: PPO={ppo_wait:.1f}, Baseline={baseline_wait:.1f}")
+                
+                # Jobs completed per seed
+                ppo_jobs = ppo_seed_metrics.get('total_jobs_completed', 0)
+                baseline_jobs = baseline_seed_metrics.get('total_jobs_completed', 0)
+                self.ppo_writer.add_scalar(f'Comparison_Seed_{seed}/Jobs_Completed', ppo_jobs, update_count)
+                self.baseline_writer.add_scalar(f'Comparison_Seed_{seed}/Jobs_Completed', baseline_jobs, update_count)
+                
+                # Calculate jobs completed improvement (higher is better)
+                if baseline_jobs > 0:
+                    jobs_improvement = ((ppo_jobs - baseline_jobs) / baseline_jobs) * 100
+                    self.writer.add_scalar(f'Improvement_Seed_{seed}/Jobs_Completed_Percent', jobs_improvement, update_count)
+                    print(f"  Seed {seed} Jobs Completed: PPO={ppo_jobs}, Baseline={baseline_jobs}, Improvement={jobs_improvement:.1f}%")
+                else:
+                    print(f"  Seed {seed} Jobs Completed: PPO={ppo_jobs}, Baseline={baseline_jobs}")
+                
+                # Log other per-seed metrics
+                self.ppo_writer.add_scalar(f'Comparison_Seed_{seed}/Episode_Return', 
+                                          ppo_seed_metrics.get('episode_return', 0), update_count)
+                self.baseline_writer.add_scalar(f'Comparison_Seed_{seed}/Episode_Return', 
+                                               baseline_seed_metrics.get('episode_return', 0), update_count)
+                
+                self.ppo_writer.add_scalar(f'Comparison_Seed_{seed}/Host_Core_Utilization', 
+                                          ppo_seed_metrics.get('avg_host_core_utilization', 0), update_count)
+                self.baseline_writer.add_scalar(f'Comparison_Seed_{seed}/Host_Core_Utilization', 
+                                               baseline_seed_metrics.get('avg_host_core_utilization', 0), update_count)
+                
+                self.ppo_writer.add_scalar(f'Comparison_Seed_{seed}/Host_Memory_Utilization', 
+                                          ppo_seed_metrics.get('avg_host_memory_utilization', 0), update_count)
+                self.baseline_writer.add_scalar(f'Comparison_Seed_{seed}/Host_Memory_Utilization', 
+                                               baseline_seed_metrics.get('avg_host_memory_utilization', 0), update_count)
+            
+            print("-" * 60)
+        
+        # Log average metrics (existing behavior)
         # Episode return comparison
-        ppo_return = ppo_metrics.get('episode_return', 0)
-        baseline_return = baseline_metrics.get('episode_return', 0)
-        self.ppo_writer.add_scalar('Comparison/Episode_Return', ppo_return, update_count)
-        self.baseline_writer.add_scalar('Comparison/Episode_Return', baseline_return, update_count)
+        ppo_return = ppo_avg.get('episode_return', 0)
+        baseline_return = baseline_avg.get('episode_return', 0)
+        self.ppo_writer.add_scalar('Comparison_Avg/Episode_Return', ppo_return, update_count)
+        self.baseline_writer.add_scalar('Comparison_Avg/Episode_Return', baseline_return, update_count)
         
         # Log improvement percentage
         if baseline_return != 0:
             improvement = ((ppo_return - baseline_return) / abs(baseline_return)) * 100
-            self.writer.add_scalar('Improvement/Episode_Return_Percent', improvement, update_count)
+            self.writer.add_scalar('Improvement_Avg/Episode_Return_Percent', improvement, update_count)
         
-        # Makespan comparison (MOST IMPORTANT for minimizing makespan)
-        ppo_makespan = ppo_metrics.get('makespan')
-        baseline_makespan = baseline_metrics.get('makespan')
+        # Average waiting time comparison (IMPORTANT metric)
+        ppo_wait = ppo_avg.get('avg_waiting_time', 0)
+        baseline_wait = baseline_avg.get('avg_waiting_time', 0)
+        self.ppo_writer.add_scalar('Comparison_Avg/Avg_Waiting_Time', ppo_wait, update_count)
+        self.baseline_writer.add_scalar('Comparison_Avg/Avg_Waiting_Time', baseline_wait, update_count)
+        
+        if baseline_wait > 0:
+            wait_improvement = ((baseline_wait - ppo_wait) / baseline_wait) * 100
+            self.writer.add_scalar('Improvement_Avg/Waiting_Time_Reduction_Percent', wait_improvement, update_count)
+            print(f"  AVERAGE Waiting Time: PPO={ppo_wait:.1f}, Baseline={baseline_wait:.1f}, Improvement={wait_improvement:.1f}%")
+        
+        # Jobs completed comparison (IMPORTANT metric)
+        ppo_jobs = ppo_avg.get('total_jobs_completed', 0)
+        baseline_jobs = baseline_avg.get('total_jobs_completed', 0)
+        self.ppo_writer.add_scalar('Comparison_Avg/Jobs_Completed', ppo_jobs, update_count)
+        self.baseline_writer.add_scalar('Comparison_Avg/Jobs_Completed', baseline_jobs, update_count)
+        
+        if baseline_jobs > 0:
+            jobs_improvement = ((ppo_jobs - baseline_jobs) / baseline_jobs) * 100
+            self.writer.add_scalar('Improvement_Avg/Jobs_Completed_Percent', jobs_improvement, update_count)
+            print(f"  AVERAGE Jobs Completed: PPO={ppo_jobs}, Baseline={baseline_jobs}, Improvement={jobs_improvement:.1f}%")
+        
+        # Makespan comparison (if available)
+        ppo_makespan = ppo_avg.get('makespan')
+        baseline_makespan = baseline_avg.get('makespan')
         if ppo_makespan is not None and baseline_makespan is not None:
-            self.ppo_writer.add_scalar('Comparison/Makespan', ppo_makespan, update_count)
-            self.baseline_writer.add_scalar('Comparison/Makespan', baseline_makespan, update_count)
+            self.ppo_writer.add_scalar('Comparison_Avg/Makespan', ppo_makespan, update_count)
+            self.baseline_writer.add_scalar('Comparison_Avg/Makespan', baseline_makespan, update_count)
             
             # Makespan improvement (lower is better)
             if baseline_makespan > 0:
                 makespan_improvement = ((baseline_makespan - ppo_makespan) / baseline_makespan) * 100
-                self.writer.add_scalar('Improvement/Makespan_Reduction_Percent', makespan_improvement, update_count)
-                print(f"  Makespan - PPO: {ppo_makespan:.0f}, Baseline: {baseline_makespan:.0f}, Improvement: {makespan_improvement:.1f}%")
+                self.writer.add_scalar('Improvement_Avg/Makespan_Reduction_Percent', makespan_improvement, update_count)
+                print(f"  AVERAGE Makespan: PPO={ppo_makespan:.0f}, Baseline={baseline_makespan:.0f}, Improvement={makespan_improvement:.1f}%")
+        
+        print("=" * 60)
         
         # Host core utilization comparison
-        ppo_core_util = ppo_metrics.get('avg_host_core_utilization', 0)
-        baseline_core_util = baseline_metrics.get('avg_host_core_utilization', 0)
-        self.ppo_writer.add_scalar('Comparison/Host_Core_Utilization', ppo_core_util, update_count)
-        self.baseline_writer.add_scalar('Comparison/Host_Core_Utilization', baseline_core_util, update_count)
+        ppo_core_util = ppo_avg.get('avg_host_core_utilization', 0)
+        baseline_core_util = baseline_avg.get('avg_host_core_utilization', 0)
+        self.ppo_writer.add_scalar('Comparison_Avg/Host_Core_Utilization', ppo_core_util, update_count)
+        self.baseline_writer.add_scalar('Comparison_Avg/Host_Core_Utilization', baseline_core_util, update_count)
         
         # Host memory utilization comparison
-        ppo_mem_util = ppo_metrics.get('avg_host_memory_utilization', 0)
-        baseline_mem_util = baseline_metrics.get('avg_host_memory_utilization', 0)
-        self.ppo_writer.add_scalar('Comparison/Host_Memory_Utilization', ppo_mem_util, update_count)
-        self.baseline_writer.add_scalar('Comparison/Host_Memory_Utilization', baseline_mem_util, update_count)
-        
-        
-        # Average waiting time comparison
-        ppo_wait = ppo_metrics.get('avg_waiting_time', 0)
-        baseline_wait = baseline_metrics.get('avg_waiting_time', 0)
-        self.ppo_writer.add_scalar('Comparison/Avg_Waiting_Time', ppo_wait, update_count)
-        self.baseline_writer.add_scalar('Comparison/Avg_Waiting_Time', baseline_wait, update_count)
+        ppo_mem_util = ppo_avg.get('avg_host_memory_utilization', 0)
+        baseline_mem_util = baseline_avg.get('avg_host_memory_utilization', 0)
+        self.ppo_writer.add_scalar('Comparison_Avg/Host_Memory_Utilization', ppo_mem_util, update_count)
+        self.baseline_writer.add_scalar('Comparison_Avg/Host_Memory_Utilization', baseline_mem_util, update_count)
         
         # Average reward per step
-        ppo_avg_reward = ppo_metrics.get('episode_return', 0) / max(ppo_metrics.get('episode_length', 1), 1)
-        baseline_avg_reward = baseline_metrics.get('episode_return', 0) / max(baseline_metrics.get('episode_length', 1), 1)
-        self.ppo_writer.add_scalar('Comparison/Avg_Reward_Per_Step', ppo_avg_reward, update_count)
-        self.baseline_writer.add_scalar('Comparison/Avg_Reward_Per_Step', baseline_avg_reward, update_count)
-        
-        # Jobs completed comparison
-        ppo_jobs = ppo_metrics.get('total_jobs_completed', 0)
-        baseline_jobs = baseline_metrics.get('total_jobs_completed', 0)
-        self.ppo_writer.add_scalar('Comparison/Jobs_Completed', ppo_jobs, update_count)
-        self.baseline_writer.add_scalar('Comparison/Jobs_Completed', baseline_jobs, update_count)
+        ppo_avg_reward = ppo_avg.get('episode_return', 0) / max(ppo_avg.get('episode_length', 1), 1)
+        baseline_avg_reward = baseline_avg.get('episode_return', 0) / max(baseline_avg.get('episode_length', 1), 1)
+        self.ppo_writer.add_scalar('Comparison_Avg/Avg_Reward_Per_Step', ppo_avg_reward, update_count)
+        self.baseline_writer.add_scalar('Comparison_Avg/Avg_Reward_Per_Step', baseline_avg_reward, update_count)
         
         # Deferral rate comparison
-        ppo_defer = ppo_metrics.get('defer_rate', 0)
-        baseline_defer = baseline_metrics.get('defer_rate', 0)
-        self.ppo_writer.add_scalar('Comparison/Defer_Rate', ppo_defer, update_count)
-        self.baseline_writer.add_scalar('Comparison/Defer_Rate', baseline_defer, update_count)
+        ppo_defer = ppo_avg.get('defer_rate', 0)
+        baseline_defer = baseline_avg.get('defer_rate', 0)
+        self.ppo_writer.add_scalar('Comparison_Avg/Defer_Rate', ppo_defer, update_count)
+        self.baseline_writer.add_scalar('Comparison_Avg/Defer_Rate', baseline_defer, update_count)
 
     def __init__(
         self,
@@ -418,12 +520,14 @@ class PPOTrainer:
         early_stopping_threshold: float = 0.01,
         value_norm_decay: float = 0.99,
         checkpoint_dir: str = None,
-        save_freq: int = 100
+        save_freq: int = 100,
+        test_seeds: List[int] = None
     ):
         self.policy = policy
         self.env = env
         self.gamma = gamma
         self.lam = lam
+        self.test_seeds = test_seeds if test_seeds is not None else [42, 43, 44]
         self.clip_coef = clip_coef
         self.ent_coef = ent_coef
         self.vf_coef = vf_coef
@@ -460,6 +564,7 @@ class PPOTrainer:
         
         # Early stopping
         self.best_test_reward = float('-inf')
+        self.best_update = 0  # Track which update had the best performance
         self.patience_counter = 0
         self.should_stop = False
         
@@ -727,7 +832,7 @@ class PPOTrainer:
         """Normalize values using running statistics"""
         return (values - self.value_mean) / (torch.sqrt(torch.tensor(self.value_var)) + 1e-8)
     
-    def save_checkpoint(self, update_count: int, metrics: Dict):
+    def save_checkpoint(self, update_count: int, metrics: Dict, checkpoint_path: str = None):
         """Save model checkpoint with training state"""
         if not self.checkpoint_dir:
             return
@@ -755,12 +860,15 @@ class PPOTrainer:
             }
         }
         
-        checkpoint_path = os.path.join(self.checkpoint_dir, f'checkpoint_{update_count}.pt')
+        if checkpoint_path is None:
+            checkpoint_path = os.path.join(self.checkpoint_dir, f'checkpoint_{update_count}.pt')
+        
         torch.save(checkpoint, checkpoint_path)
         
-        # Also save as latest
-        latest_path = os.path.join(self.checkpoint_dir, 'latest.pt')
-        torch.save(checkpoint, latest_path)
+        # Also save as latest if not a custom path
+        if 'best_model' not in checkpoint_path:
+            latest_path = os.path.join(self.checkpoint_dir, 'latest.pt')
+            torch.save(checkpoint, latest_path)
         
         print(f"Checkpoint saved: {checkpoint_path}")
     
@@ -890,8 +998,8 @@ class PPOTrainer:
         
         # Run initial test before training begins
         print("\nRunning initial performance test...")
-        ppo_metrics = self.test_with_metrics(num_episodes=1, update_count=0, policy_name="PPO", test_seeds=[42])
-        baseline_metrics = self.test_baseline_with_metrics(num_episodes=1, update_count=0, test_seeds=[42])
+        ppo_metrics = self.test_with_metrics(num_episodes=len(self.test_seeds), update_count=0, policy_name="PPO", test_seeds=self.test_seeds)
+        baseline_metrics = self.test_baseline_with_metrics(num_episodes=len(self.test_seeds), update_count=0, test_seeds=self.test_seeds)
         
         # Log initial comparison
         self.log_metric_comparison(ppo_metrics, baseline_metrics, 0)
@@ -988,13 +1096,73 @@ class PPOTrainer:
             
             # Run test episodes at specified intervals
             if self.metrics_reporter.should_run_test(update_count):
-                ppo_metrics = self.test_with_metrics(num_episodes=1, update_count=update_count, policy_name="PPO", test_seeds=[42])
-                baseline_metrics = self.test_baseline_with_metrics(num_episodes=1, update_count=update_count, test_seeds=[42])
+                ppo_metrics = self.test_with_metrics(num_episodes=len(self.test_seeds), update_count=update_count, policy_name="PPO", test_seeds=self.test_seeds)
+                baseline_metrics = self.test_baseline_with_metrics(num_episodes=len(self.test_seeds), update_count=update_count, test_seeds=self.test_seeds)
 
                 # Compare performance metrics
                 self.log_metric_comparison(ppo_metrics, baseline_metrics, update_count)
+                
+                # Check early stopping based on average episode return
+                ppo_avg = ppo_metrics.get('average', ppo_metrics)
+                current_test_reward = ppo_avg.get('episode_return', 0)
+                
+                # Also track waiting time as a key metric (lower is better)
+                current_wait_time = ppo_avg.get('avg_waiting_time', float('inf'))
+                current_jobs = ppo_avg.get('total_jobs_completed', 0)
+                
+                # Check if performance improved
+                if current_test_reward > self.best_test_reward * (1 + self.early_stopping_threshold):
+                    self.best_test_reward = current_test_reward
+                    self.best_update = update_count  # Track which update was best
+                    self.patience_counter = 0
+                    print(f"  New best test reward: {self.best_test_reward:.3f} at update {update_count}")
+                    
+                    # Save checkpoint when we find a new best
+                    if self.checkpoint_dir:
+                        # Save with update number in filename
+                        best_path = os.path.join(self.checkpoint_dir, f'best_model_{update_count}.pt')
+                        self.save_checkpoint(update_count, self.get_training_summary(), best_path)
+                        print(f"  Saved new best model to {best_path}")
+                        
+                        # Also save/overwrite as 'best_model.pt' for easy access
+                        latest_best_path = os.path.join(self.checkpoint_dir, 'best_model.pt')
+                        self.save_checkpoint(update_count, self.get_training_summary(), latest_best_path)
+                else:
+                    self.patience_counter += 1
+                    
+                    # Check if performance is significantly dropping
+                    performance_drop = (self.best_test_reward - current_test_reward) / abs(self.best_test_reward) if self.best_test_reward != 0 else 0
+                    
+                    if performance_drop > 0.1:  # More than 10% drop from best
+                        print(f"  WARNING: Performance dropped {performance_drop*100:.1f}% from best. Patience: {self.patience_counter}/{self.early_stopping_patience}")
+                        
+                        # Accelerate early stopping if performance is consistently dropping
+                        if performance_drop > 0.2:  # More than 20% drop
+                            self.patience_counter += 2  # Count as 3 strikes instead of 1
+                            print(f"  SEVERE performance drop detected. Accelerating early stopping.")
+                    else:
+                        print(f"  No improvement. Patience: {self.patience_counter}/{self.early_stopping_patience}")
+                    
+                if self.patience_counter >= self.early_stopping_patience:
+                    self.should_stop = True
+                    print(f"  Early stopping triggered.")
+                    print(f"  Best model was at update {self.best_update} with reward {self.best_test_reward:.3f}")
+                    
+                    # Load the best model before stopping
+                    if self.checkpoint_dir:
+                        best_path = os.path.join(self.checkpoint_dir, f'best_model_{self.best_update}.pt')
+                        if os.path.exists(best_path):
+                            self.load_checkpoint(best_path)
+                            print(f"  Loaded best model from {best_path}")
+                        else:
+                            # Fallback to generic best_model.pt if specific version not found
+                            fallback_path = os.path.join(self.checkpoint_dir, 'best_model.pt')
+                            if os.path.exists(fallback_path):
+                                self.load_checkpoint(fallback_path)
+                                print(f"  Loaded best model from {fallback_path}")
 
         training_time = time.time() - start_time
+        print(f"\n{'='*60}")
         print(f"Training completed in {training_time:.2f} seconds")
         print(f"Total updates: {update_count}")
         print(f"Final FPS: {timesteps_collected / training_time:.0f}")
@@ -1006,6 +1174,15 @@ class PPOTrainer:
         if self.metrics_reporter.test_metrics['avg_reward']:
             final_test_reward = self.metrics_reporter.test_metrics['avg_reward'][-1]
             print(f"Final test reward: {final_test_reward:.3f}")
+        
+        # Report best model information
+        print(f"\n{'='*60}")
+        print(f"BEST MODEL SUMMARY:")
+        print(f"  Update: {self.best_update}")
+        print(f"  Test Reward: {self.best_test_reward:.3f}")
+        if self.checkpoint_dir:
+            print(f"  Saved as: best_model_{self.best_update}.pt")
+        print(f"{'='*60}")
         
         self.writer.close()
         self.ppo_writer.close()

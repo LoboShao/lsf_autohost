@@ -71,6 +71,10 @@ class LsfEnvWrapper(gym.Env):
     def get_metrics(self):
         return self.rust_env.get_metrics()
     
+    def get_cluster_info(self):
+        """Get cluster resource information."""
+        return self.rust_env.get_cluster_info()
+    
     def set_random_seed(self, seed=None):
         """Set the random seed for the underlying Rust environment.
         
