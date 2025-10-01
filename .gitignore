@@ -90,6 +90,9 @@ logs/
 # Ignore JetBrains IDE project files
 .idea/
 
+# Ignore VS Code settings
+.vscode/
+
 # Claude.md - personal assistant instructions
 **/CLAUDE.md
 
