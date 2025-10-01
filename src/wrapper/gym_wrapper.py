@@ -6,7 +6,11 @@ from typing import List, Any, Tuple
 
 
 class LsfEnvWrapper(gym.Env):
-    """Gymnasium wrapper for the Rust cluster scheduler environment."""
+    """Gymnasium wrapper for the Rust cluster scheduler environment.
+    
+    Provides a standard Gymnasium interface to the high-performance Rust-based
+    cluster simulation for training RL agents on job scheduling tasks.
+    """
     
     def __init__(self, **kwargs):
         super().__init__()
@@ -198,7 +202,7 @@ def make_lsf_env(num_envs: int = 1, **kwargs):
 
 if __name__ == "__main__":
     print("Testing direct Rust env call:")
-    rust_env = ClusterSchedulerEnv(num_hosts=10, episode_length=10)
+    rust_env = ClusterSchedulerEnv(num_hosts=10, max_time=10)
     obs = rust_env.reset()
     print(f"Initial obs: {obs}")
     for i in range(5):
@@ -209,7 +213,7 @@ if __name__ == "__main__":
             break
 
     print("\nTesting Gym wrapper:")
-    env = LsfEnvWrapper(num_hosts=10, episode_length=10)
+    env = LsfEnvWrapper(num_hosts=10, max_time=10)
     obs, info = env.reset()
     print(f"Initial obs: {obs}")
     for i in range(5):

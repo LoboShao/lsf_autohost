@@ -96,7 +96,7 @@ python src/training/lsf_train.py --log-dir experiment_name
 **Core Environment Settings**:
 ```bash
 --num-hosts 10              # Number of compute hosts in cluster
---episode-length 500        # Episode length in time units (~20x timesteps)
+--simulation-time 500       # Simulation time in seconds per episode
 --max-jobs-per-step 30      # Maximum jobs arriving per timestep
 ```
 
@@ -199,7 +199,7 @@ python src/training/lsf_train.py --log-dir experiment_name
 **Environment Scaling**:
 - More hosts → larger action space → may need lower LR
 - Higher `--max-jobs-per-step` → more scheduling pressure → harder learning
-- Longer `--episode-length` → more rewards per episode but slower rollouts
+- Longer `--simulation-time` → more rewards per episode but slower rollouts
 
 ### Deterministic Testing Data
 
@@ -252,7 +252,7 @@ Large cluster training with advanced features:
 ```bash
 python src/training/lsf_train.py \
   --num-hosts 100 \
-  --episode-length 300 \
+  --simulation-time 300 \
   --max-jobs-per-step 80 \
   --total-timesteps 100000000 \
   --rollout-steps 16384 \
@@ -294,7 +294,7 @@ job_memory_range = (512, 4*1024)   # 512MB-4GB memory requirements
 |-----------|---------------|-------------|
 | `num_hosts` | 50-100 | Cluster size |
 | `max_jobs_per_step` | 30-80 | Job arrival rate (scheduling pressure) |
-| `max_time` | 150-300 | Episode length in seconds |
+| `max_time` | 150-300 | Simulation time in seconds |
 | `host_cores_range` | (16, 32) | CPU diversity |
 | `host_memory_range` | (64GB, 128GB) | Memory diversity |
 
@@ -317,7 +317,7 @@ Training configurations can be saved and loaded:
 # Example configuration
 config = {
     "num_hosts": 100,
-    "episode_length": 300,
+    "simulation_time": 300,
     "rollout_steps": 16384,
     "learning_rate": 1e-4,
     # ... additional parameters

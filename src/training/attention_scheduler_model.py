@@ -4,8 +4,11 @@ from torch.distributions import Normal
 import numpy as np
 
 
-class VariableHostPolicy(nn.Module):
-    """Variable Host Policy that processes hosts individually using attention mechanism."""
+class AttentionSchedulerPolicy(nn.Module):
+    """Hierarchical Attention-based Scheduler Policy for LSF Job Assignment
+    
+    Uses sequential attention mechanism to process job requirements, queue state,
+    and host resources for optimal scheduling decisions."""
     
     def __init__(self, obs_dim, action_dim, num_hosts=30, exploration_noise_decay=0.995, min_exploration_noise=0.01):
         super().__init__()
@@ -13,27 +16,45 @@ class VariableHostPolicy(nn.Module):
         self.action_dim = action_dim
         self.num_hosts = num_hosts
         
-        self.hidden_size = 64
+        self.hidden_size = 32
         
         # Exploration noise scheduling
         self.exploration_noise_decay = exploration_noise_decay
         self.min_exploration_noise = min_exploration_noise
         self.current_exploration_noise = 1.0
         
-        self.host_encoder = nn.Sequential(
-            nn.Linear(4, 64),
-            nn.GELU(),
-            nn.Linear(64, self.hidden_size)
-        )
-        
+        # Component-specific encoders with LayerNorm for stability
         self.job_encoder = nn.Sequential(
-            nn.Linear(7, 128),
+            nn.Linear(3, 32),  # cores, memory, normalized_waiting_time
+            nn.LayerNorm(32),
             nn.GELU(),
-            nn.Linear(128, self.hidden_size)
+            nn.Linear(32, self.hidden_size)
         )
         
-        self.attention = nn.MultiheadAttention(self.hidden_size, num_heads=4, batch_first=True)
+        self.queue_encoder = nn.Sequential(
+            nn.Linear(4, 32),  # jobs_processed_counter, queue_pressure, core_pressure, memory_pressure
+            nn.LayerNorm(32),
+            nn.GELU(),
+            nn.Linear(32, self.hidden_size)
+        )
         
+        self.host_encoder = nn.Sequential(
+            nn.Linear(2, 32),  # available_cores_norm, available_memory_norm
+            nn.LayerNorm(32),
+            nn.GELU(),
+            nn.Linear(32, self.hidden_size)
+        )
+        
+        # Sequential attention layers
+        self.job_queue_attention = nn.MultiheadAttention(
+            self.hidden_size, num_heads=4, batch_first=True
+        )
+        
+        self.host_attention = nn.MultiheadAttention(
+            self.hidden_size, num_heads=4, batch_first=True
+        )
+        
+        # Output heads
         self.priority_head = nn.Linear(self.hidden_size, 1)
         
         self.value_head = nn.Sequential(
@@ -58,26 +79,52 @@ class VariableHostPolicy(nn.Module):
             obs = obs.unsqueeze(0)
         
         batch_size = obs.shape[0]
-        num_hosts = (obs.shape[1] - 7) // 4
+        num_hosts = (obs.shape[1] - 7) // 2
         
-        # Parse observation: [host1_core_util, host1_mem_util, host1_cores_norm, host1_mem_norm, ..., job_features[7]]
-        host_features = obs[:, :num_hosts * 4].view(batch_size, num_hosts, 4)  # [batch, num_hosts, 4]
-        job_features = obs[:, -7:]  # [batch, 7] - enhanced job features with position
+        # Parse observation: [host_features[2*num_hosts], 7 job/queue features]
+        host_features = obs[:, :num_hosts * 2].view(batch_size, num_hosts, 2)  # [batch, num_hosts, 2]
         
-        # Encode features (activation inside encoders now)
-        host_embeds = self.host_encoder(host_features)  # [batch, num_hosts, hidden_size]
-        job_embed = self.job_encoder(job_features).unsqueeze(1)  # [batch, 1, hidden_size]
+        # Job features (3 features) - intrinsic job properties
+        job_features = torch.stack([
+            obs[:, num_hosts * 2],      # job_cores_norm
+            obs[:, num_hosts * 2 + 1],  # job_mem_norm  
+            obs[:, num_hosts * 2 + 2],  # normalized_waiting_time
+        ], dim=1)  # [batch, 3]
         
-        # Attention: job queries host capabilities
-        attended_hosts, attention_weights = self.attention(job_embed, host_embeds, host_embeds)  # [batch, 1, hidden_size]
+        # Queue/Context features (4 features) - scheduling context
+        queue_features = torch.stack([
+            obs[:, num_hosts * 2 + 3],  # jobs_processed_counter (batch progress)
+            obs[:, num_hosts * 2 + 4],  # queue_pressure
+            obs[:, num_hosts * 2 + 5],  # core_pressure
+            obs[:, num_hosts * 2 + 6],  # memory_pressure
+        ], dim=1)  # [batch, 4]
         
-        # Generate priorities combining host features and job-host attention
-        priority_scores = self.priority_head(host_embeds).squeeze(-1)  # [batch, num_hosts] - host preferences
-        attention_scores = attention_weights.squeeze(1)  # [batch, num_hosts] - job-host compatibility
-        action_mean = torch.sigmoid(priority_scores + attention_scores)  # [batch, num_hosts] - combined signal
+        # Encode each component separately
+        host_embeds = self.host_encoder(host_features)  # [batch, num_hosts, hidden]
+        job_embed = self.job_encoder(job_features).unsqueeze(1)  # [batch, 1, hidden]
+        queue_embed = self.queue_encoder(queue_features).unsqueeze(1)  # [batch, 1, hidden]
         
-        # Value estimation using attended job-host representation
-        value = self.value_head(attended_hosts.squeeze(1))  # [batch, 1]
+        # Step 1: Job-Queue interaction - "What does this job need given queue context?"
+        job_queue_context, _ = self.job_queue_attention(
+            job_embed,      # Query: current job
+            queue_embed,    # Key/Value: queue context
+            queue_embed
+        )  # [batch, 1, hidden]
+        
+        # Step 2: Job+Queue context queries hosts - "Which hosts match these requirements?"
+        final_context, attention_weights = self.host_attention(
+            job_queue_context,  # Query: job enriched with queue context
+            host_embeds,        # Key/Value: host capabilities
+            host_embeds
+        )  # [batch, 1, hidden], [batch, 1, num_hosts]
+        
+        # Generate host priorities
+        priority_scores = self.priority_head(host_embeds).squeeze(-1)  # [batch, num_hosts]
+        attention_scores = attention_weights.squeeze(1)  # [batch, num_hosts]
+        action_mean = torch.sigmoid(priority_scores + attention_scores)  # [batch, num_hosts]
+        
+        # Value estimation using enriched job-queue-host context
+        value = self.value_head(final_context.squeeze(1))  # [batch, 1]
         
         # Skip expensive action_std computation for deterministic inference
         if deterministic:
