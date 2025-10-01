@@ -1110,8 +1110,8 @@ class PPOTrainer:
                 current_wait_time = ppo_avg.get('avg_waiting_time', float('inf'))
                 current_jobs = ppo_avg.get('total_jobs_completed', 0)
                 
-                # Check if performance improved
-                if current_test_reward > self.best_test_reward * (1 + self.early_stopping_threshold):
+                # Check if performance improved (no threshold now)
+                if current_test_reward > self.best_test_reward:
                     self.best_test_reward = current_test_reward
                     self.best_update = update_count  # Track which update was best
                     self.patience_counter = 0

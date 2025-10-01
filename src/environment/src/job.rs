@@ -18,6 +18,7 @@ pub struct Job {
     pub assigned_host: Option<usize>,
     pub status: JobStatus,
     pub deferred_count: u32,  // Number of times this job has been deferred
+    pub bucket_key: String,    // Key for bucket grouping (e.g., "c_4_m_512")
 }
 
 impl Job {
@@ -28,6 +29,10 @@ impl Job {
         duration: u32,
         submission_time: f64,
     ) -> Self {
+        // Generate bucket key - using unique job ID for per-job scheduling
+        // This ensures each job is in its own bucket
+        let bucket_key = format!("job_{}", id);
+        
         Job {
             id,
             cores_required,
@@ -39,6 +44,7 @@ impl Job {
             assigned_host: None,
             status: JobStatus::Pending,
             deferred_count: 0,
+            bucket_key,
         }
     }
 }
