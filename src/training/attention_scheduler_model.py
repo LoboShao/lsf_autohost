@@ -25,22 +25,22 @@ class AttentionSchedulerPolicy(nn.Module):
         
         # Component-specific encoders with LayerNorm for stability
         self.job_encoder = nn.Sequential(
-            nn.Linear(3, 32),  # cores, memory, normalized_waiting_time
-            nn.LayerNorm(32),
+            nn.Linear(4, 32),  # cores, memory, duration, is_deferred
+            # nn.LayerNorm(32),
             nn.GELU(),
             nn.Linear(32, self.hidden_size)
         )
         
         self.queue_encoder = nn.Sequential(
-            nn.Linear(4, 32),  # jobs_processed_counter, queue_pressure, core_pressure, memory_pressure
-            nn.LayerNorm(32),
+            nn.Linear(4, 64),  # batch_progress, queue_pressure, core_pressure, memory_pressure
+            # nn.LayerNorm(64),
             nn.GELU(),
-            nn.Linear(32, self.hidden_size)
+            nn.Linear(64, self.hidden_size)
         )
         
         self.host_encoder = nn.Sequential(
             nn.Linear(2, 32),  # available_cores_norm, available_memory_norm
-            nn.LayerNorm(32),
+            # nn.LayerNorm(32),
             nn.GELU(),
             nn.Linear(32, self.hidden_size)
         )
@@ -79,24 +79,25 @@ class AttentionSchedulerPolicy(nn.Module):
             obs = obs.unsqueeze(0)
         
         batch_size = obs.shape[0]
-        num_hosts = (obs.shape[1] - 7) // 2
+        num_hosts = (obs.shape[1] - 8) // 2  # Updated: 8 job features
         
-        # Parse observation: [host_features[2*num_hosts], 7 job/queue features]
+        # Parse observation: [host_features[2*num_hosts], 8 job/queue features]
         host_features = obs[:, :num_hosts * 2].view(batch_size, num_hosts, 2)  # [batch, num_hosts, 2]
         
-        # Job features (3 features) - intrinsic job properties
+        # Job features (4 features) - intrinsic job properties
         job_features = torch.stack([
             obs[:, num_hosts * 2],      # job_cores_norm
             obs[:, num_hosts * 2 + 1],  # job_mem_norm  
-            obs[:, num_hosts * 2 + 2],  # normalized_waiting_time
-        ], dim=1)  # [batch, 3]
+            obs[:, num_hosts * 2 + 2],  # job_duration_norm
+            obs[:, num_hosts * 2 + 3],  # is_deferred
+        ], dim=1)  # [batch, 4]
         
         # Queue/Context features (4 features) - scheduling context
         queue_features = torch.stack([
-            obs[:, num_hosts * 2 + 3],  # jobs_processed_counter (batch progress)
-            obs[:, num_hosts * 2 + 4],  # queue_pressure
-            obs[:, num_hosts * 2 + 5],  # core_pressure
-            obs[:, num_hosts * 2 + 6],  # memory_pressure
+            obs[:, num_hosts * 2 + 4],  # batch_progress
+            obs[:, num_hosts * 2 + 5],  # queue_pressure
+            obs[:, num_hosts * 2 + 6],  # core_pressure
+            obs[:, num_hosts * 2 + 7],  # memory_pressure
         ], dim=1)  # [batch, 4]
         
         # Encode each component separately

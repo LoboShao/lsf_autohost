@@ -92,6 +92,7 @@ pub struct ClusterSchedulerEnv {
     
     // Cached state vector
     cached_state: Vec<f32>,
+    
 }
 
 #[pymethods]
@@ -166,8 +167,8 @@ impl ClusterSchedulerEnv {
         let host_core_utils = vec![0.0; num_hosts];
         let host_memory_utils = vec![0.0; num_hosts];
         
-        // Pre-allocate cached state with correct size (2 features per host + 7 job features)
-        let state_size = num_hosts * 2 + 7;
+        // Pre-allocate cached state with correct size (2 features per host + 8 job features)
+        let state_size = num_hosts * 2 + 8;
         let cached_state = vec![0.0; state_size];
         
         ClusterSchedulerEnv {
@@ -480,19 +481,22 @@ impl ClusterSchedulerEnv {
             // 2. Job memory normalized
             self.cached_state[job_batch_idx + 1] = job.memory_required as f32 / self.job_memory_range.1 as f32;
             
-            // 3. Binary is_deferred flag (1 if job has been waiting > 1 second, 0 otherwise)
+            // 3. Job duration normalized
+            self.cached_state[job_batch_idx + 2] = job.duration as f32 / self.job_duration_range.1 as f32;
+            
+            // 4. Binary is_deferred flag (1 if job has been waiting > 1 second, 0 otherwise)
             let current_waiting_time = self.current_time as f64 - job.submission_time;
             let is_deferred = if current_waiting_time > 1.0 { 1.0 } else { 0.0 };
-            self.cached_state[job_batch_idx + 2] = is_deferred;
+            self.cached_state[job_batch_idx + 3] = is_deferred;
             
-            // 4. Batch progress normalized with tanh - same scale as queue pressure
+            // 5. Batch progress normalized with tanh - same scale as queue pressure
             // Using num_hosts as natural scale for consistency with queue pressure
             // This is more robust for real LSF where exact batch index might not be available
             let batch_scale = self.num_hosts as f32;
-            self.cached_state[job_batch_idx + 3] = (self.current_batch_index as f32 / batch_scale).tanh();
+            self.cached_state[job_batch_idx + 4] = (self.current_batch_index as f32 / batch_scale).tanh();
             
-            // Queue features start at index 4
-            // 5. Queue pressure - using tanh with num_hosts as natural scale
+            // Queue features start at index 5
+            // 6. Queue pressure - using tanh with num_hosts as natural scale
             // num_hosts represents one round of scheduling capacity
             // tanh gives smooth saturation: queue=num_hosts → 0.76, queue=2*num_hosts → 0.96
             let jobs_in_cycle = if !self.batch_processing_queue.is_empty() {
@@ -502,7 +506,7 @@ impl ClusterSchedulerEnv {
                 self.job_queue.len() + self.job_buckets.iter().map(|b| b.jobs.len()).sum::<usize>()
             };
             let queue_scale = self.num_hosts as f32;
-            self.cached_state[job_batch_idx + 4] = (jobs_in_cycle as f32 / queue_scale).tanh();
+            self.cached_state[job_batch_idx + 5] = (jobs_in_cycle as f32 / queue_scale).tanh();
             
             // Calculate total resource pressure for all jobs
             let mut total_cores_needed = 0u32;
@@ -529,11 +533,12 @@ impl ClusterSchedulerEnv {
                 }
             }
             
-            // 6. Core pressure ratio 
-            self.cached_state[job_batch_idx + 5] = (total_cores_needed as f32) / (self.total_cluster_cores as f32);
+            // 7. Core pressure ratio 
+            self.cached_state[job_batch_idx + 6] = (total_cores_needed as f32) / (self.total_cluster_cores as f32);
             
-            // 7. Memory pressure ratio
-            self.cached_state[job_batch_idx + 6] = (total_memory_needed as f32) / (self.total_cluster_memory as f32);
+            // 8. Memory pressure ratio
+            self.cached_state[job_batch_idx + 7] = (total_memory_needed as f32) / (self.total_cluster_memory as f32);
+            
         }
   
         Ok(PyArray1::from_slice(py, &self.cached_state).to_owned())
@@ -1078,6 +1083,8 @@ impl ClusterSchedulerEnv {
     }
     
     fn schedule_single_job_from_batch(&mut self, job: Job, action: &[f64]) -> usize {
+        // Track that we're attempting to allocate resources for this job
+        
         // First check if this job can be scheduled on ANY host
         let can_be_scheduled = self.hosts.iter().any(|host| {
             host.total_cores >= job.cores_required && host.total_memory >= job.memory_required

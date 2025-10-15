@@ -34,12 +34,12 @@ def parse_args():
     # Training hyperparameters
     parser.add_argument('--total-timesteps', type=int, default=4096*4*4096, help='Total training timesteps: rollout_steps × num_envs × num_updates')
     parser.add_argument('--rollout-steps', type=int, default=4096, help='Steps per rollout buffer')
-    parser.add_argument('--lr', type=float, default=1e-5, help='Learning rate')
+    parser.add_argument('--lr', type=float, default=3e-4, help='Learning rate')
     parser.add_argument('--gamma', type=float, default=0.99, help='Discount factor')
-    parser.add_argument('--lam', type=float, default=0.99, help='GAE lambda')
-    parser.add_argument('--clip-coef', type=float, default=0.1, help='PPO clipping coefficient')
-    parser.add_argument('--ent-coef', type=float, default=0.025, help='Entropy coefficient for exploration')
-    parser.add_argument('--vf-coef', type=float, default=5.0, help='Value function loss coefficient')
+    parser.add_argument('--lam', type=float, default=0.98, help='GAE lambda')
+    parser.add_argument('--clip-coef', type=float, default=0.2, help='PPO clipping coefficient')
+    parser.add_argument('--ent-coef', type=float, default=0.01, help='Entropy coefficient for exploration')
+    parser.add_argument('--vf-coef', type=float, default=0.5, help='Value function loss coefficient')
     parser.add_argument('--update-epochs', type=int, default=2, help='SGD epochs per rollout')
     parser.add_argument('--minibatch-size', type=int, default=512, help='Minibatch size for SGD')
     parser.add_argument('--buffer-size', type=int, default=2048, help='Rollout buffer size')
@@ -53,20 +53,24 @@ def parse_args():
     
     # Advanced RL techniques
     parser.add_argument('--lr-schedule', type=str, default='linear', 
-                       choices=['constant', 'linear', 'exponential', 'cosine', 'warmup_cosine'],
+                       choices=['constant', 'linear', 'exponential', 'cosine'],
                        help='Learning rate schedule')
     parser.add_argument('--lr-decay-factor', type=float, default=0.995, help='Learning rate decay factor for exponential schedule')
-    parser.add_argument('--lr-warmup-steps', type=int, default=200, help='Warmup steps for warmup schedules')
+    parser.add_argument('--lr-warmup-steps', type=int, default=200, help='Warmup steps for all schedulers (0 to disable warmup)')
     parser.add_argument('--early-stopping-patience', type=int, default=50, help='Early stopping patience')
     parser.add_argument('--early-stopping-threshold', type=float, default=0.01, help='Early stopping improvement threshold')
     parser.add_argument('--value-norm-decay', type=float, default=0.99, help='Value normalization decay factor')
-    parser.add_argument('--log-dir', type=str, default=None, help='Log directory for TensorBoard logs, checkpoints, and test data')
+    parser.add_argument('--log-dir', type=str, default="expnew3", help='Log directory for TensorBoard logs, checkpoints, and test data')
     parser.add_argument('--save-freq', type=int, default=250, help='Checkpoint save frequency (updates)')
     parser.add_argument('--resume-from', type=str, default=None, help='Resume training from checkpoint')
     parser.add_argument('--exploration-noise-decay', type=float, default=0.995, help='Exploration noise decay factor')
     parser.add_argument('--min-exploration-noise', type=float, default=0.02, help='Minimum exploration noise')
     parser.add_argument('--num-envs', type=int, default=4, help='Number of parallel environments')
     parser.add_argument('--test-seeds', type=int, nargs='+', default=[42, 43, 44], help='Seeds to use for deterministic testing (e.g., --test-seeds 42 43 44)')
+    parser.add_argument('--use-kl-adaptive-lr', action='store_true', default=True, help='Enable KL-divergence based adaptive learning rate (default: enabled)')
+    parser.add_argument('--kl-target', type=float, default=0.02, help='Target KL divergence for adaptive LR (default: 0.02)')
+    parser.add_argument('--combine-kl-with-scheduler', action='store_true', default=False, 
+                       help='Combine KL-adaptive LR with scheduler. If False and KL is enabled, only KL-adaptive is used (no scheduler)')
     
     return parser.parse_args()
 
@@ -178,7 +182,10 @@ def main() -> None:
         value_norm_decay=args.value_norm_decay,
         checkpoint_dir=checkpoint_dir,
         save_freq=args.save_freq,
-        test_seeds=args.test_seeds
+        test_seeds=args.test_seeds,
+        use_kl_adaptive_lr=args.use_kl_adaptive_lr,
+        kl_target=args.kl_target,
+        combine_kl_with_scheduler=args.combine_kl_with_scheduler
     )
     
     # Resume from checkpoint if specified
@@ -190,7 +197,20 @@ def main() -> None:
     # Train
     try:
         print("Starting advanced PPO training with:")
-        print(f"- Learning rate schedule: {args.lr_schedule}")
+        
+        # Build LR strategy description
+        lr_strategy_parts = []
+        if args.use_kl_adaptive_lr:
+            lr_strategy_parts.append(f"KL-adaptive (target={args.kl_target})")
+            if args.combine_kl_with_scheduler:
+                lr_strategy_parts.append(f"{args.lr_schedule} scheduler")
+        else:
+            lr_strategy_parts.append(f"{args.lr_schedule} scheduler")
+        
+        # Add warmup info if applicable
+        warmup_info = f" with {args.lr_warmup_steps}-step warmup" if args.lr_warmup_steps > 0 else " (no warmup)"
+        
+        print(f"- LR Strategy: {' + '.join(lr_strategy_parts)}{warmup_info}")
         print(f"- Early stopping patience: {args.early_stopping_patience}")
         print(f"- Value normalization decay: {args.value_norm_decay}")
         print(f"- Exploration noise decay: {args.exploration_noise_decay}")

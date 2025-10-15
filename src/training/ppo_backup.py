@@ -1,15 +1,204 @@
 import torch
+import torch.nn as nn
 import torch.optim as optim
+from torch.optim.lr_scheduler import LinearLR, ExponentialLR, CosineAnnealingLR, SequentialLR
 import numpy as np
 from collections import defaultdict
 import time
-from typing import Dict, List, Optional
+from typing import Dict, List, Tuple, Optional
 from torch.utils.tensorboard import SummaryWriter
 import json
 import os
 
 # Import utility classes
-from .utils import PPOBuffer, MetricsReporter, FirstAvailableBaseline, LRSchedulerManager
+from .utils import PPOBuffer, MetricsReporter, FirstAvailableBaseline
+
+
+class PPOBuffer:
+    def __init__(self, size: int, obs_dim: int, action_dim: int, device: torch.device):
+        self.size = size
+        self.device = device
+        self.ptr = 0
+        self.full = False
+
+        self.obs = torch.zeros((size, obs_dim), dtype=torch.float32, device=device)
+        self.actions = torch.zeros((size, action_dim), dtype=torch.float32, device=device)
+        self.rewards = torch.zeros(size, dtype=torch.float32, device=device)
+        self.values = torch.zeros(size, dtype=torch.float32, device=device)
+        self.log_probs = torch.zeros(size, dtype=torch.float32, device=device)
+        self.dones = torch.zeros(size, dtype=torch.bool, device=device)
+        self.advantages = torch.zeros(size, dtype=torch.float32, device=device)
+        self.returns = torch.zeros(size, dtype=torch.float32, device=device)
+
+    def store(self, obs, action, reward, value, log_prob, done):
+        self.obs[self.ptr] = torch.as_tensor(obs, dtype=torch.float32, device=self.device)
+        self.actions[self.ptr] = torch.as_tensor(action, dtype=torch.float32, device=self.device)
+        self.rewards[self.ptr] = torch.as_tensor(reward, dtype=torch.float32, device=self.device)
+        self.values[self.ptr] = torch.as_tensor(value, dtype=torch.float32, device=self.device)
+        self.log_probs[self.ptr] = torch.as_tensor(log_prob, dtype=torch.float32, device=self.device)
+        self.dones[self.ptr] = torch.as_tensor(done, dtype=torch.bool, device=self.device)
+
+        self.ptr = (self.ptr + 1) % self.size
+        if self.ptr == 0:
+            self.full = True
+
+    def compute_advantages(self, last_value: float, gamma: float = 0.99, lam: float = 0.95):
+        buffer_size = self.size if self.full else self.ptr
+
+        rewards = self.rewards[:buffer_size]
+        values = self.values[:buffer_size]
+        dones = self.dones[:buffer_size]
+
+        advantages = torch.zeros_like(rewards)
+        last_gae = 0.0
+
+        for t in reversed(range(buffer_size)):
+            next_non_terminal = 1.0 - dones[t].float()
+            next_value = last_value if t == buffer_size - 1 else values[t + 1]
+
+            delta = rewards[t] + gamma * next_value * next_non_terminal - values[t]
+            advantages[t] = last_gae = delta + gamma * lam * next_non_terminal * last_gae
+
+        returns = advantages + values
+
+        adv_mean = advantages.mean()
+        adv_std = advantages.std()
+        advantages = (advantages - adv_mean) / (adv_std + 1e-8)
+
+        self.advantages[:buffer_size] = advantages
+        self.returns[:buffer_size] = returns
+
+    def get_batch(self):
+        buffer_size = self.size if self.full else self.ptr
+        return {
+            'obs': self.obs[:buffer_size],
+            'actions': self.actions[:buffer_size],
+            'log_probs': self.log_probs[:buffer_size],
+            'advantages': self.advantages[:buffer_size],
+            'returns': self.returns[:buffer_size],
+            'values': self.values[:buffer_size]
+        }
+
+    def clear(self):
+        self.ptr = 0
+        self.full = False
+
+
+class MetricsReporter:
+    def __init__(self, writer: SummaryWriter, ppo_writer: SummaryWriter = None, baseline_writer: SummaryWriter = None, test_interval: int = 10):
+        self.writer = writer
+        self.ppo_writer = ppo_writer
+        self.baseline_writer = baseline_writer
+        self.test_interval = test_interval
+        self.training_metrics = defaultdict(list)
+        self.test_metrics = defaultdict(list)
+
+    def log_training_metrics(self, update_count: int, rollout_metrics: Dict, update_metrics: Dict, timesteps_collected: int, fps: float):
+        avg_reward = np.mean(rollout_metrics['rewards'])
+        avg_value = np.mean(rollout_metrics['values'])
+        avg_entropy = np.mean(rollout_metrics['entropies'])
+        avg_total_loss = np.mean(update_metrics['total_loss'])
+        avg_policy_loss = np.mean(update_metrics['policy_loss'])
+        avg_value_loss = np.mean(update_metrics['value_loss'])
+        avg_entropy_loss = np.mean(update_metrics['entropy_loss'])
+        avg_approx_kl = np.mean(update_metrics['approx_kl'])
+        
+        # Enhanced console output with more meaningful metrics
+        if 'episode_returns' in rollout_metrics and rollout_metrics['episode_returns']:
+            avg_episode_return = np.mean(rollout_metrics['episode_returns'])
+            num_episodes = len(rollout_metrics['episode_returns'])
+            max_episode_return = np.max(rollout_metrics['episode_returns'])
+            print(f"Update {update_count:4d} | Timesteps {timesteps_collected:7d} | FPS {fps:6.0f} | Episodes {num_episodes:2d} | EpReturn {avg_episode_return:7.1f} (max: {max_episode_return:7.1f})")
+        else:
+            # Show cumulative reward (now meaningful with utilization rewards)
+            total_reward = sum(rollout_metrics['rewards'])
+            avg_reward = np.mean(rollout_metrics['rewards'])
+            print(f"Update {update_count:4d} | Timesteps {timesteps_collected:7d} | FPS {fps:6.0f} | TotalReward {total_reward:7.1f} | AvgReward {avg_reward:6.3f}")
+
+        self.writer.add_scalar('Training/Total_Loss', avg_total_loss, update_count)
+        self.writer.add_scalar('Training/Policy_Loss', avg_policy_loss, update_count)
+        self.writer.add_scalar('Training/Value_Loss', avg_value_loss, update_count)
+        self.writer.add_scalar('Training/Entropy_Loss', avg_entropy_loss, update_count)
+        self.writer.add_scalar('Training/Approx_KL', avg_approx_kl, update_count)
+        self.writer.add_scalar('Performance/Reward_Per_Step', avg_reward, update_count)
+        self.writer.add_scalar('Performance/Value', avg_value, update_count)
+        self.writer.add_scalar('Performance/Entropy', avg_entropy, update_count)
+        self.writer.add_scalar('Performance/FPS', fps, update_count)
+        
+        # Log episode returns if available
+        if 'episode_returns' in rollout_metrics and rollout_metrics['episode_returns']:
+            avg_episode_return = np.mean(rollout_metrics['episode_returns'])
+            max_episode_return = np.max(rollout_metrics['episode_returns'])
+            min_episode_return = np.min(rollout_metrics['episode_returns'])
+            self.writer.add_scalar('Performance/Episode_Return_Avg', avg_episode_return, update_count)
+            self.writer.add_scalar('Performance/Episode_Return_Max', max_episode_return, update_count)
+            self.writer.add_scalar('Performance/Episode_Return_Min', min_episode_return, update_count)
+            self.writer.add_scalar('Performance/Episodes_Completed', len(rollout_metrics['episode_returns']), update_count)
+            
+            if 'episode_lengths' in rollout_metrics:
+                avg_episode_length = np.mean(rollout_metrics['episode_lengths'])
+                self.writer.add_scalar('Performance/Episode_Length_Avg', avg_episode_length, update_count)
+
+        # Log environment metrics collected during rollouts
+        for key, values in rollout_metrics.items():
+            if key.startswith('env_') and values:
+                avg_value = np.mean(values)
+                metric_name = key[4:]  # Remove 'env_' prefix
+                self.writer.add_scalar(f'Environment/{metric_name}', avg_value, update_count)
+
+        self.training_metrics['update_count'].append(update_count)
+        self.training_metrics['timesteps'].append(timesteps_collected)
+        self.training_metrics['reward'].append(avg_reward)
+        self.training_metrics['total_loss'].append(avg_total_loss)
+        self.training_metrics['policy_loss'].append(avg_policy_loss)
+        self.training_metrics['value_loss'].append(avg_value_loss)
+        self.training_metrics['fps'].append(fps)
+
+    def log_environment_metrics(self, env, update_count: int, prefix: str = 'Environment'):
+        if hasattr(env, 'get_metrics'):
+            env_metrics = env.get_metrics()
+            if isinstance(env_metrics, dict):
+                for key, value in env_metrics.items():
+                    if isinstance(value, (int, float)):
+                        self.writer.add_scalar(f'{prefix}/{key}', value, update_count)
+
+    def should_run_test(self, update_count: int) -> bool:
+        return update_count % self.test_interval == 0
+
+    def log_test_results(self, test_rewards: List[float], env_metrics: Dict, update_count: int):
+        avg_test_reward = np.mean(test_rewards)
+        std_test_reward = np.std(test_rewards)
+        min_test_reward = np.min(test_rewards)
+        max_test_reward = np.max(test_rewards)
+
+        print(f"[TEST] Update {update_count:4d} | Avg: {avg_test_reward:.3f} ± {std_test_reward:.3f} | Range: [{min_test_reward:.3f}, {max_test_reward:.3f}]")
+
+        self.writer.add_scalar('Test/Avg_Reward', avg_test_reward, update_count)
+        self.writer.add_scalar('Test/Std_Reward', std_test_reward, update_count)
+        self.writer.add_scalar('Test/Min_Reward', min_test_reward, update_count)
+        self.writer.add_scalar('Test/Max_Reward', max_test_reward, update_count)
+
+        for metric_name, values in env_metrics.items():
+            if values:
+                avg_value = np.mean(values)
+                self.writer.add_scalar(f'Test/{metric_name}', avg_value, update_count)
+
+        self.test_metrics['update_count'].append(update_count)
+        self.test_metrics['avg_reward'].append(avg_test_reward)
+        self.test_metrics['std_reward'].append(std_test_reward)
+
+        return avg_test_reward
+
+
+class FirstAvailableBaseline:
+    """Baseline that always selects first available host (highest priority to host 0)"""
+    def __init__(self, num_hosts):
+        self.num_hosts = num_hosts
+    
+    def get_action_and_value(self, obs, deterministic=True):
+        # Return decreasing priorities: host 0 gets highest priority (1.0), host 1 gets 0.9, etc.
+        action = torch.linspace(1.0, 0.0, self.num_hosts)
+        return action, None, None, None
 
 
 class PPOTrainer:
@@ -197,8 +386,13 @@ class PPOTrainer:
                 self.ppo_writer.add_scalar(f'Comparison_Seed_{seed}/Avg_Waiting_Time', ppo_wait, update_count)
                 self.baseline_writer.add_scalar(f'Comparison_Seed_{seed}/Avg_Waiting_Time', baseline_wait, update_count)
                 
-                # Log waiting time comparison
-                print(f"  Seed {seed} Avg Waiting Time: PPO={ppo_wait:.1f}, Baseline={baseline_wait:.1f}")
+                # Calculate waiting time improvement (lower is better)
+                if baseline_wait > 0:
+                    wait_improvement = ((baseline_wait - ppo_wait) / baseline_wait) * 100
+                    self.writer.add_scalar(f'Improvement_Seed_{seed}/Waiting_Time_Reduction_Percent', wait_improvement, update_count)
+                    print(f"  Seed {seed} Avg Waiting Time: PPO={ppo_wait:.1f}, Baseline={baseline_wait:.1f}, Improvement={wait_improvement:.1f}%")
+                else:
+                    print(f"  Seed {seed} Avg Waiting Time: PPO={ppo_wait:.1f}, Baseline={baseline_wait:.1f}")
                 
                 # Jobs completed per seed
                 ppo_jobs = ppo_seed_metrics.get('total_jobs_completed', 0)
@@ -206,8 +400,13 @@ class PPOTrainer:
                 self.ppo_writer.add_scalar(f'Comparison_Seed_{seed}/Jobs_Completed', ppo_jobs, update_count)
                 self.baseline_writer.add_scalar(f'Comparison_Seed_{seed}/Jobs_Completed', baseline_jobs, update_count)
                 
-                # Log jobs completed comparison
-                print(f"  Seed {seed} Jobs Completed: PPO={ppo_jobs}, Baseline={baseline_jobs}")
+                # Calculate jobs completed improvement (higher is better)
+                if baseline_jobs > 0:
+                    jobs_improvement = ((ppo_jobs - baseline_jobs) / baseline_jobs) * 100
+                    self.writer.add_scalar(f'Improvement_Seed_{seed}/Jobs_Completed_Percent', jobs_improvement, update_count)
+                    print(f"  Seed {seed} Jobs Completed: PPO={ppo_jobs}, Baseline={baseline_jobs}, Improvement={jobs_improvement:.1f}%")
+                else:
+                    print(f"  Seed {seed} Jobs Completed: PPO={ppo_jobs}, Baseline={baseline_jobs}")
                 
                 # Log other per-seed metrics
                 self.ppo_writer.add_scalar(f'Comparison_Seed_{seed}/Episode_Return', 
@@ -234,6 +433,10 @@ class PPOTrainer:
         self.ppo_writer.add_scalar('Comparison_Avg/Episode_Return', ppo_return, update_count)
         self.baseline_writer.add_scalar('Comparison_Avg/Episode_Return', baseline_return, update_count)
         
+        # Log improvement percentage
+        if baseline_return != 0:
+            improvement = ((ppo_return - baseline_return) / abs(baseline_return)) * 100
+            self.writer.add_scalar('Improvement_Avg/Episode_Return_Percent', improvement, update_count)
         
         # Average waiting time comparison (IMPORTANT metric)
         ppo_wait = ppo_avg.get('avg_waiting_time', 0)
@@ -241,7 +444,10 @@ class PPOTrainer:
         self.ppo_writer.add_scalar('Comparison_Avg/Avg_Waiting_Time', ppo_wait, update_count)
         self.baseline_writer.add_scalar('Comparison_Avg/Avg_Waiting_Time', baseline_wait, update_count)
         
-        print(f"  AVERAGE Waiting Time: PPO={ppo_wait:.1f}, Baseline={baseline_wait:.1f}")
+        if baseline_wait > 0:
+            wait_improvement = ((baseline_wait - ppo_wait) / baseline_wait) * 100
+            self.writer.add_scalar('Improvement_Avg/Waiting_Time_Reduction_Percent', wait_improvement, update_count)
+            print(f"  AVERAGE Waiting Time: PPO={ppo_wait:.1f}, Baseline={baseline_wait:.1f}, Improvement={wait_improvement:.1f}%")
         
         # Jobs completed comparison (IMPORTANT metric)
         ppo_jobs = ppo_avg.get('total_jobs_completed', 0)
@@ -249,7 +455,10 @@ class PPOTrainer:
         self.ppo_writer.add_scalar('Comparison_Avg/Jobs_Completed', ppo_jobs, update_count)
         self.baseline_writer.add_scalar('Comparison_Avg/Jobs_Completed', baseline_jobs, update_count)
         
-        print(f"  AVERAGE Jobs Completed: PPO={ppo_jobs}, Baseline={baseline_jobs}")
+        if baseline_jobs > 0:
+            jobs_improvement = ((ppo_jobs - baseline_jobs) / baseline_jobs) * 100
+            self.writer.add_scalar('Improvement_Avg/Jobs_Completed_Percent', jobs_improvement, update_count)
+            print(f"  AVERAGE Jobs Completed: PPO={ppo_jobs}, Baseline={baseline_jobs}, Improvement={jobs_improvement:.1f}%")
         
         # Makespan comparison (if available)
         ppo_makespan = ppo_avg.get('makespan')
@@ -258,7 +467,11 @@ class PPOTrainer:
             self.ppo_writer.add_scalar('Comparison_Avg/Makespan', ppo_makespan, update_count)
             self.baseline_writer.add_scalar('Comparison_Avg/Makespan', baseline_makespan, update_count)
             
-            print(f"  AVERAGE Makespan: PPO={ppo_makespan:.0f}, Baseline={baseline_makespan:.0f}")
+            # Makespan improvement (lower is better)
+            if baseline_makespan > 0:
+                makespan_improvement = ((baseline_makespan - ppo_makespan) / baseline_makespan) * 100
+                self.writer.add_scalar('Improvement_Avg/Makespan_Reduction_Percent', makespan_improvement, update_count)
+                print(f"  AVERAGE Makespan: PPO={ppo_makespan:.0f}, Baseline={baseline_makespan:.0f}, Improvement={makespan_improvement:.1f}%")
         
         print("=" * 60)
         
@@ -311,10 +524,7 @@ class PPOTrainer:
         value_norm_decay: float = 0.99,
         checkpoint_dir: str = None,
         save_freq: int = 100,
-        test_seeds: List[int] = None,
-        use_kl_adaptive_lr: bool = False,
-        kl_target: float = 0.02,
-        combine_kl_with_scheduler: bool = False
+        test_seeds: List[int] = None
     ):
         self.policy = policy
         self.env = env
@@ -343,6 +553,9 @@ class PPOTrainer:
         self.policy.to(self.device)
         
         self.lr = lr
+        self.lr_schedule = lr_schedule
+        self.lr_decay_factor = lr_decay_factor
+        self.lr_warmup_steps = lr_warmup_steps
         self.early_stopping_patience = early_stopping_patience
         self.early_stopping_threshold = early_stopping_threshold
         self.value_norm_decay = value_norm_decay
@@ -350,21 +563,7 @@ class PPOTrainer:
         self.save_freq = save_freq
         
         self.optimizer = optim.Adam(self.policy.parameters(), lr=lr)
-        
-        # Initialize the unified LR scheduler manager
-        # Will be properly initialized in train() with actual total_updates
-        self.lr_manager = LRSchedulerManager(
-            optimizer=self.optimizer,
-            base_lr=lr,
-            schedule_type=lr_schedule,
-            total_updates=1000,  # Will be updated in train()
-            warmup_steps=lr_warmup_steps,
-            use_kl_adaptive=use_kl_adaptive_lr,
-            kl_target=kl_target,
-            combine_kl_with_scheduler=combine_kl_with_scheduler,
-            lr_decay_factor=lr_decay_factor,
-            lr_min_factor=0.01
-        )
+        self.scheduler = self._create_lr_scheduler()
         
         # Early stopping
         self.best_test_reward = float('-inf')
@@ -396,6 +595,7 @@ class PPOTrainer:
             action_dim = env.action_space.shape[0]
             self.buffer = PPOBuffer(buffer_size, obs_dim, action_dim, self.device)
         
+        self.metrics = defaultdict(list)
         self.writer = SummaryWriter(tensorboard_log_dir)
         
         # Create separate writers for PPO and Baseline comparison
@@ -604,6 +804,23 @@ class PPOTrainer:
         
         return rollout_metrics
     
+    def _create_lr_scheduler(self):
+        """Create learning rate scheduler based on configuration"""
+        if self.lr_schedule == "constant":
+            return None
+        elif self.lr_schedule == "linear":
+            estimated_updates = 1000
+            return LinearLR(self.optimizer, start_factor=1.0, end_factor=0.1, total_iters=estimated_updates)
+        elif self.lr_schedule == "exponential":
+            return ExponentialLR(self.optimizer, gamma=self.lr_decay_factor)
+        elif self.lr_schedule == "cosine":
+            return CosineAnnealingLR(self.optimizer, T_max=1000, eta_min=self.lr * 0.01)
+        elif self.lr_schedule == "warmup_cosine":
+            warmup_scheduler = LinearLR(self.optimizer, start_factor=0.1, end_factor=1.0, total_iters=self.lr_warmup_steps)
+            cosine_scheduler = CosineAnnealingLR(self.optimizer, T_max=1000, eta_min=self.lr * 0.01)
+            return SequentialLR(self.optimizer, [warmup_scheduler, cosine_scheduler], milestones=[self.lr_warmup_steps])
+        else:
+            raise ValueError(f"Unknown learning rate schedule: {self.lr_schedule}")
     
     def _update_value_normalization(self, values):
         """Update running statistics for value normalization"""
@@ -626,7 +843,7 @@ class PPOTrainer:
         checkpoint = {
             'policy_state_dict': self.policy.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
-            'lr_manager_state_dict': self.lr_manager.state_dict(),
+            'scheduler_state_dict': self.scheduler.state_dict() if self.scheduler else None,
             'update_count': update_count,
             'best_test_reward': self.best_test_reward,
             'patience_counter': self.patience_counter,
@@ -635,15 +852,14 @@ class PPOTrainer:
             'metrics': metrics,
             'config': {
                 'lr': self.lr,
+                'lr_schedule': self.lr_schedule,
+                'lr_decay_factor': self.lr_decay_factor,
                 'gamma': self.gamma,
                 'lam': self.lam,
                 'clip_coef': self.clip_coef,
                 'ent_coef': self.ent_coef,
                 'vf_coef': self.vf_coef,
                 'max_grad_norm': self.max_grad_norm
-            },
-            'lr_config': {
-                'strategy': self.lr_manager.get_description()
             }
         }
         
@@ -666,11 +882,8 @@ class PPOTrainer:
         self.policy.load_state_dict(checkpoint['policy_state_dict'])
         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         
-        if 'lr_manager_state_dict' in checkpoint:
-            self.lr_manager.load_state_dict(checkpoint['lr_manager_state_dict'])
-        elif 'scheduler_state_dict' in checkpoint:
-            # Backward compatibility with old checkpoints
-            print("Warning: Loading old checkpoint format, LR scheduler state may not be fully restored")
+        if checkpoint['scheduler_state_dict'] and self.scheduler:
+            self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
         
         self.best_test_reward = checkpoint['best_test_reward']
         self.patience_counter = checkpoint['patience_counter']
@@ -715,9 +928,6 @@ class PPOTrainer:
                 mb_advantages = batch['advantages'][mb_indices]
                 mb_returns = batch['returns'][mb_indices]
                 mb_old_values = batch['values'][mb_indices]
-                
-                # Normalize advantages per minibatch (critical for stable training with sparse rewards)
-                mb_advantages = (mb_advantages - mb_advantages.mean()) / (mb_advantages.std() + 1e-8)
                 
                 # Get new policy outputs
                 _, new_log_probs, entropy, new_values = self.policy.get_action_and_value(mb_obs, mb_actions)
@@ -769,11 +979,16 @@ class PPOTrainer:
         timesteps_collected = 0
         update_count = 0
         
-        # Re-initialize LR manager with actual total updates
+        # Update scheduler with actual training parameters
         estimated_updates = total_timesteps // (rollout_steps * self.num_envs)
-        self.lr_manager.total_updates = estimated_updates
-        # Recreate the scheduler with the correct total updates
-        self.lr_manager.scheduler = self.lr_manager._create_scheduler()
+        if self.lr_schedule == "linear":
+            self.scheduler = LinearLR(self.optimizer, start_factor=1.0, end_factor=0.1, total_iters=estimated_updates)
+        elif self.lr_schedule == "cosine":
+            self.scheduler = CosineAnnealingLR(self.optimizer, T_max=estimated_updates, eta_min=self.lr * 0.01)
+        elif self.lr_schedule == "warmup_cosine":
+            warmup_scheduler = LinearLR(self.optimizer, start_factor=0.1, end_factor=1.0, total_iters=self.lr_warmup_steps)
+            cosine_scheduler = CosineAnnealingLR(self.optimizer, T_max=estimated_updates-self.lr_warmup_steps, eta_min=self.lr * 0.01)
+            self.scheduler = SequentialLR(self.optimizer, [warmup_scheduler, cosine_scheduler], milestones=[self.lr_warmup_steps])
         
         # Set test interval if provided
         if test_interval is not None:
@@ -781,7 +996,6 @@ class PPOTrainer:
         
         print(f"Starting PPO training on {self.device}")
         print(f"Policy parameters: {sum(p.numel() for p in self.policy.parameters()):,}")
-        print(f"LR Strategy: {self.lr_manager.get_description()}")
         print(f"TensorBoard logs: {self.writer.log_dir}")
         print(f"Test episodes will run every {self.metrics_reporter.test_interval} updates")
         
@@ -820,15 +1034,12 @@ class PPOTrainer:
             update_metrics = self.update_policy()
             update_count += 1
 
-            # Step learning rate scheduler with KL divergence if available
-            avg_kl = None
-            if 'approx_kl' in update_metrics and update_metrics['approx_kl']:
-                avg_kl = np.mean(update_metrics['approx_kl'])
-            
-            # Step the unified LR manager
-            current_lr = self.lr_manager.step(kl_divergence=avg_kl, verbose=(update_count % log_interval == 0))
-            self.lr_history.append(current_lr)
-            update_metrics['learning_rate'] = [current_lr]
+            # Step learning rate scheduler
+            if self.scheduler:
+                self.scheduler.step()
+                current_lr = self.optimizer.param_groups[0]['lr']
+                self.lr_history.append(current_lr)
+                update_metrics['learning_rate'] = [current_lr]
             
             # Decay exploration noise
             if hasattr(self.policy, 'decay_exploration_noise'):
@@ -863,21 +1074,19 @@ class PPOTrainer:
                 if self.lr_history:
                     self.writer.add_scalar('Training/Learning_Rate', self.lr_history[-1], update_count)
                 
-                # Log KL divergence and adjustment factor
-                if 'approx_kl' in update_metrics and update_metrics['approx_kl']:
-                    avg_kl = np.mean(update_metrics['approx_kl'])
-                    self.writer.add_scalar('Training/KL_Divergence', avg_kl, update_count)
-                    if self.lr_manager.kl_adaptive:
-                        self.writer.add_scalar('Training/LR_Adjustment_Factor', 
-                                             self.lr_manager.kl_adaptive.adjustment_factor, update_count)
-                
                 if 'exploration_noise' in update_metrics:
                     self.writer.add_scalar('Training/Exploration_Noise', update_metrics['exploration_noise'][0], update_count)
                 
                 self.writer.add_scalar('Training/Value_Mean', self.value_mean, update_count)
                 self.writer.add_scalar('Training/Value_Var', self.value_var, update_count)
                 
-                # Metrics are tracked by metrics_reporter, no need for redundant tracking
+                avg_reward = np.mean(rollout_metrics['rewards'])
+                avg_value = np.mean(rollout_metrics['values'])
+                avg_total_loss = np.mean(update_metrics['total_loss'])
+                self.metrics['timesteps'].append(timesteps_collected)
+                self.metrics['rewards'].append(avg_reward)
+                self.metrics['values'].append(avg_value)
+                self.metrics['total_loss'].append(avg_total_loss)
             
             # Save checkpoint at specified intervals
             if self.checkpoint_dir and update_count % self.save_freq == 0:
@@ -899,6 +1108,10 @@ class PPOTrainer:
                 # Check early stopping based on average episode return
                 ppo_avg = ppo_metrics.get('average', ppo_metrics)
                 current_test_reward = ppo_avg.get('episode_return', 0)
+                
+                # Also track waiting time as a key metric (lower is better)
+                current_wait_time = ppo_avg.get('avg_waiting_time', float('inf'))
+                current_jobs = ppo_avg.get('total_jobs_completed', 0)
                 
                 # Check if performance improved (no threshold now)
                 if current_test_reward > self.best_test_reward:

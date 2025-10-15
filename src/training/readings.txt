@@ -1,0 +1,37 @@
+Sparse Reward Reinforcement Learning Papers
+
+===============================
+REWARD SHAPING & EXPLORATION
+===============================
+
+Top 3 Papers:
+
+1. DreamSmooth: Improving Model-based Reinforcement Learning via Reward Smoothing
+Conference: ICLR 2024
+Authors: Vint Lee, Pieter Abbeel, Youngwoon Lee
+Link: https://arxiv.org/abs/2311.01450
+GitHub: https://github.com/vint-1/dreamsmooth
+Key idea: Temporal smoothing of rewards in model-based RL. Instead of predicting exact rewards at each timestep, learns to predict temporally-smoothed rewards, which is particularly effective for sparse reward environments.
+
+2. Exploration-Guided Reward Shaping for Reinforcement Learning under Sparse Rewards (ExploRS)
+Conference: NeurIPS 2022
+Authors: Rati Devidze, Parameswaran Kamalaruban, Adish Singla
+Link: https://papers.nips.cc/paper_files/paper/2022/hash/266c0f191b04cbbbe529016d0edc847e-Abstract-Conference.html
+GitHub: https://github.com/machine-teaching-group/neurips2022_exploration-guided-reward-shaping
+Key idea: Self-supervised reward shaping framework that combines intrinsic reward functions with exploration-based bonuses, works without external domain knowledge.
+
+3. Maximum State Entropy Exploration using Predecessor and Successor Representations
+Conference: NeurIPS 2023
+Link: https://proceedings.neurips.cc/paper_files/paper/2023/hash/9c7900fac04a701cbed83256b76dbaa3-Abstract-Conference.html
+Key idea: Combines predecessor and successor representations to predict state visitation entropy for strategic exploration and maximizing state coverage with limited samples.
+
+===============================
+TRAINING & IMITATION LEARNING
+===============================
+
+1. RLIF: Interactive Imitation Learning as Reinforcement Learning
+Key idea: Frames interactive imitation learning as a reinforcement learning problem, enabling the use of standard RL algorithms for learning from human feedback and demonstrations.
+
+2. GKD: Generalized Knowledge Distillation
+Conference: ICLR 2024
+Key idea: On-policy distillation where student generates its own rollouts and receives teacher feedback. Enables seamless integration of distillation with RL fine-tuning (PPO/REINFORCE), allowing student to potentially surpass teacher performance.
