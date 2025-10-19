@@ -14,16 +14,19 @@ from src.training.ppo import PPOTrainer
 def parse_args():
     parser = argparse.ArgumentParser(description='Train PPO agent on LSF scheduling environment')
     
-    # Environment configuration  
+    # ================== Environment Configuration ==================
     parser.add_argument('--num-hosts', type=int, default=30, help='Number of hosts in the cluster')
     parser.add_argument('--simulation-time', type=int, default=500, help='Simulation time in seconds for each episode')
     parser.add_argument('--max-jobs-per-step', type=int, default=3, help='Maximum jobs arriving per timestep')
+    parser.add_argument('--num-envs', type=int, default=4, help='Number of parallel environments')
     
-    # Resource configuration
+    # ================== Host Resource Configuration ==================
     parser.add_argument('--host-cores-min', type=int, default=32, help='Minimum host cores')
     parser.add_argument('--host-cores-max', type=int, default=64, help='Maximum host cores')
     parser.add_argument('--host-memory-min', type=int, default=32*1024, help='Minimum host memory (MB)')
     parser.add_argument('--host-memory-max', type=int, default=64*1024, help='Maximum host memory (MB)')
+    
+    # ================== Job Resource Configuration ==================
     parser.add_argument('--job-cores-min', type=int, default=1, help='Minimum job cores')
     parser.add_argument('--job-cores-max', type=int, default=8, help='Maximum job cores')
     parser.add_argument('--job-memory-min', type=int, default=1*1024, help='Minimum job memory (MB)')
@@ -31,46 +34,51 @@ def parse_args():
     parser.add_argument('--job-duration-min', type=int, default=30, help='Minimum job duration (seconds)')
     parser.add_argument('--job-duration-max', type=int, default=300, help='Maximum job duration (seconds)')
     
-    # Training hyperparameters
-    parser.add_argument('--total-timesteps', type=int, default=4096*4*4096, help='Total training timesteps: rollout_steps × num_envs × num_updates')
-    parser.add_argument('--rollout-steps', type=int, default=4096, help='Steps per rollout buffer')
-    parser.add_argument('--lr', type=float, default=3e-4, help='Learning rate')
+    # ================== Core PPO Hyperparameters ==================
+    parser.add_argument('--total-timesteps', type=int, default=2048*4*(4096*2), help='Total training timesteps: rollout_steps × num_envs × num_updates')
+    parser.add_argument('--rollout-steps', type=int, default=2048, help='Steps per rollout buffer')
+    parser.add_argument('--buffer-size', type=int, default=2048, help='Rollout buffer size')
+    parser.add_argument('--update-epochs', type=int, default=2, help='SGD epochs per rollout')
+    parser.add_argument('--minibatch-size', type=int, default=512, help='Minibatch size for SGD')
     parser.add_argument('--gamma', type=float, default=0.99, help='Discount factor')
     parser.add_argument('--lam', type=float, default=0.98, help='GAE lambda')
     parser.add_argument('--clip-coef', type=float, default=0.2, help='PPO clipping coefficient')
-    parser.add_argument('--ent-coef', type=float, default=0.01, help='Entropy coefficient for exploration')
     parser.add_argument('--vf-coef', type=float, default=0.5, help='Value function loss coefficient')
-    parser.add_argument('--update-epochs', type=int, default=2, help='SGD epochs per rollout')
-    parser.add_argument('--minibatch-size', type=int, default=512, help='Minibatch size for SGD')
-    parser.add_argument('--buffer-size', type=int, default=2048, help='Rollout buffer size')
-
-    # System args
-    parser.add_argument('--device', type=str, default='cpu', help='Device to use (auto, cpu, cuda, mps)')
-    parser.add_argument('--seed', type=int, default=42, help='Random seed')
-    parser.add_argument('--log-interval', type=int, default=5, help='Logging interval (updates)')
-    parser.add_argument('--test-interval', type=int, default=50, help='Testing interval (updates)')
-    parser.add_argument('--save-model', type=str, default=None, help='Path to save the trained model')
+    parser.add_argument('--ent-coef', type=float, default=0.01, help='Entropy coefficient for exploration')
     
-    # Advanced RL techniques
+    # ================== Learning Rate Configuration ==================
+    parser.add_argument('--lr', type=float, default=3e-4, help='Base learning rate')
     parser.add_argument('--lr-schedule', type=str, default='linear', 
                        choices=['constant', 'linear', 'exponential', 'cosine'],
                        help='Learning rate schedule')
-    parser.add_argument('--lr-decay-factor', type=float, default=0.995, help='Learning rate decay factor for exponential schedule')
     parser.add_argument('--lr-warmup-steps', type=int, default=200, help='Warmup steps for all schedulers (0 to disable warmup)')
-    parser.add_argument('--early-stopping-patience', type=int, default=50, help='Early stopping patience')
-    parser.add_argument('--early-stopping-threshold', type=float, default=0.01, help='Early stopping improvement threshold')
-    parser.add_argument('--value-norm-decay', type=float, default=0.99, help='Value normalization decay factor')
-    parser.add_argument('--log-dir', type=str, default="expnew3", help='Log directory for TensorBoard logs, checkpoints, and test data')
-    parser.add_argument('--save-freq', type=int, default=250, help='Checkpoint save frequency (updates)')
-    parser.add_argument('--resume-from', type=str, default=None, help='Resume training from checkpoint')
-    parser.add_argument('--exploration-noise-decay', type=float, default=0.995, help='Exploration noise decay factor')
-    parser.add_argument('--min-exploration-noise', type=float, default=0.02, help='Minimum exploration noise')
-    parser.add_argument('--num-envs', type=int, default=4, help='Number of parallel environments')
-    parser.add_argument('--test-seeds', type=int, nargs='+', default=[42, 43, 44], help='Seeds to use for deterministic testing (e.g., --test-seeds 42 43 44)')
+    parser.add_argument('--lr-decay-factor', type=float, default=0.995, help='Learning rate decay factor for exponential schedule')
     parser.add_argument('--use-kl-adaptive-lr', action='store_true', default=True, help='Enable KL-divergence based adaptive learning rate (default: enabled)')
     parser.add_argument('--kl-target', type=float, default=0.02, help='Target KL divergence for adaptive LR (default: 0.02)')
-    parser.add_argument('--combine-kl-with-scheduler', action='store_true', default=False, 
+    parser.add_argument('--combine-kl-with-scheduler', action='store_true', default=True, 
                        help='Combine KL-adaptive LR with scheduler. If False and KL is enabled, only KL-adaptive is used (no scheduler)')
+    
+    # ================== Exploration and Regularization ==================
+    parser.add_argument('--exploration-noise-decay', type=float, default=0.995, help='Exploration noise decay factor')
+    parser.add_argument('--min-exploration-noise', type=float, default=0.02, help='Minimum exploration noise')
+    parser.add_argument('--value-norm-decay', type=float, default=0.99, help='Value normalization decay factor')
+    
+    # ================== Training Control ==================
+    parser.add_argument('--early-stopping-patience', type=int, default=50, help='Early stopping patience')
+    parser.add_argument('--early-stopping-threshold', type=float, default=0.01, help='Early stopping improvement threshold')
+    parser.add_argument('--seed', type=int, default=42, help='Random seed')
+    parser.add_argument('--test-seeds', type=int, nargs='+', default=[42, 43, 44], help='Seeds to use for deterministic testing (e.g., --test-seeds 42 43 44)')
+    
+    # ================== Logging and Checkpointing ==================
+    parser.add_argument('--log-dir', type=str, default="expnew4", help='Log directory for TensorBoard logs, checkpoints, and test data')
+    parser.add_argument('--log-interval', type=int, default=5, help='Logging interval (updates)')
+    parser.add_argument('--test-interval', type=int, default=50, help='Testing interval (updates)')
+    parser.add_argument('--save-freq', type=int, default=250, help='Checkpoint save frequency (updates)')
+    parser.add_argument('--save-model', type=str, default=None, help='Path to save the trained model')
+    parser.add_argument('--resume-from', type=str, default=None, help='Resume training from checkpoint')
+    
+    # ================== System Configuration ==================
+    parser.add_argument('--device', type=str, default='cpu', help='Device to use (auto, cpu, cuda, mps)')
     
     return parser.parse_args()
 

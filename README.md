@@ -20,7 +20,8 @@ src/
 ├── training/             # PPO implementation
 │   ├── lsf_train.py     # Main training script
 │   ├── ppo.py           # PPO algorithm implementation
-│   └── variable_host_model.py  # Neural network architecture
+│   ├── attention_scheduler_model.py  # Neural network architecture
+│   └── utils.py         # Training utilities
 └── wrapper/              # Environment interfaces
     └── gym_wrapper.py   # Gymnasium compatibility
 ```
@@ -42,12 +43,28 @@ New Jobs → Job Queue → Submission Queue → Agent Decision → Host Assignme
          Deferred Jobs ← ← ← ← ← ← ← ← ← ← ← (if insufficient resources)
 ```
 
-**State Representation** (size: `num_hosts * 4 + 2`):
-- Per-host features: CPU utilization, memory utilization, normalized cores, normalized memory
-- Global job features: normalized core/memory requirements for current job
+**State Representation**:
+- Job features
+- Host features 
+- Job queue features
 
 **Action Interface**:
 The agent receives host priority vectors as input and must select which host to assign the current job. Invalid assignments (insufficient resources) are automatically handled.
+
+**Bucket Key Configuration**:
+Jobs are grouped into buckets based on the key generation in `env.rs`:
+- **Default**: Each job uses its job ID as key (unique bucket per job)
+- **Alternative**: Use job attributes (cores + memory) as key to group similar jobs
+- Modify `generate_bucket_key()` in `env.rs` to change grouping strategy
+
+Example configurations:
+```rust
+// Default: unique bucket per job
+format!("job_{}", job_id)
+
+// LSF-style: group by attributes  
+format!("c_{}_m_{}", job.cores_required, job.memory_required)
+```
 
 **Core Environment Methods**:
 - `reset()`: Initialize cluster state and job schedules
@@ -134,7 +151,7 @@ python src/training/lsf_train.py --log-dir experiment_name
 
 **Learning Rate Scheduling**:
 ```bash
---lr-schedule cosine        # Options: constant, linear, exponential, cosine, warmup_cosine
+--lr-schedule warmup_linear # Options: constant, linear, exponential, cosine, warmup_cosine, warmup_linear
 --lr-warmup-steps 1000      # Gradual LR increase at start (~5-10% of total updates)
 --lr-decay-factor 0.995     # For exponential decay only
 ```
@@ -151,6 +168,18 @@ python src/training/lsf_train.py --log-dir experiment_name
 ```bash
 --value-norm-decay 0.99         # Value normalization decay
 --exploration-noise-decay 0.998 # Policy exploration noise decay
+--kl-coef 0.01                  # KL divergence coefficient for adaptive learning rate
+--kl-target 0.015               # Target KL divergence for adaptive LR
+```
+
+**KL-Divergence Adaptive Learning Rate**:
+- KL-divergence dynamically adjusts learning rate based on policy changes
+- Works with other LR schedulers (warmup, linear, cosine)
+- **Best Results**: Enable warmup + linear decay + KL-adapted based on experiments
+
+Recommended configuration:
+```bash
+--lr-schedule warmup_linear --kl-coef 0.01 --kl-target 0.015
 ```
 
 ### Hyperparameter Tuning Guide
