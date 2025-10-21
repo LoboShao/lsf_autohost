@@ -70,7 +70,7 @@ def parse_args():
     parser.add_argument('--test-seeds', type=int, nargs='+', default=[42, 43, 44], help='Seeds to use for deterministic testing (e.g., --test-seeds 42 43 44)')
     
     # ================== Logging and Checkpointing ==================
-    parser.add_argument('--log-dir', type=str, default="expnew4", help='Log directory for TensorBoard logs, checkpoints, and test data')
+    parser.add_argument('--log-dir', type=str, default="expnew5", help='Log directory for TensorBoard logs, checkpoints, and test data')
     parser.add_argument('--log-interval', type=int, default=5, help='Logging interval (updates)')
     parser.add_argument('--test-interval', type=int, default=50, help='Testing interval (updates)')
     parser.add_argument('--save-freq', type=int, default=250, help='Checkpoint save frequency (updates)')
