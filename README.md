@@ -22,6 +22,9 @@ src/
 │   ├── ppo.py           # PPO algorithm implementation
 │   ├── attention_scheduler_model.py  # Neural network architecture
 │   └── utils.py         # Training utilities
+├── model_deploy/         # Model deployment service
+│   ├── app.py           # Flask REST API for model inference
+│   └── best_model.pt    # Trained model checkpoint
 └── wrapper/              # Environment interfaces
     └── gym_wrapper.py   # Gymnasium compatibility
 ```
@@ -368,5 +371,24 @@ tensorboard --logdir logs/
 - PPO vs baseline comparisons
 - Learning rate schedules
 - Exploration statistics
+
+## Model Deployment
+
+The trained model can be deployed as a REST API service using Flask.
+
+### Quick Start
+
+```bash
+cd src/model_deploy
+python app.py
+```
+
+The service starts on `http://0.0.0.0:5001` and provides a `/select_host` endpoint that accepts normalized state vectors and returns host priority scores.
+
+**Files**:
+- `app.py`: Flask API server for model inference
+- `best_model.pt`: Trained model checkpoint
+
+For LSF integration and usage details, see the separate deployment repository.
 
 
