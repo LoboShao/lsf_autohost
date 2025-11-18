@@ -35,3 +35,18 @@ Key idea: Frames interactive imitation learning as a reinforcement learning prob
 2. GKD: Generalized Knowledge Distillation
 Conference: ICLR 2024
 Key idea: On-policy distillation where student generates its own rollouts and receives teacher feedback. Enables seamless integration of distillation with RL fine-tuning (PPO/REINFORCE), allowing student to potentially surpass teacher performance.
+
+
+
+
+
+
+chrome-extension://efaidnbmnnnibpcajpcglclefindmkaj/https://arxiv.org/pdf/2303.06135
+Rewarding Chatbots for Real-World Engagement" (Chai Research, Mar 2023), use conversatiomnal length as feed back
+
+https://research.google/blog/using-reinforcement-learning-for-dynamic-planning-in-open-ended-conversations/
+Google Research - "Dynamic Planning in Open-Ended Conversations" (May 2023), use rl to do content selection
+
+https://arxiv.org/abs/2505.14946
+Reinforcement Learning from User Feedback (RLUF)" (May 2025)
+very new, june 2025, predict the likehood that an LLM response will receive a Love reaction
