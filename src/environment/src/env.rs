@@ -321,11 +321,17 @@ impl ClusterSchedulerEnv {
         
         // Add initial jobs for time=0
         self.add_new_jobs_to_queue();
-        
+
         self.get_state(py)
     }
     
     pub fn step(&mut self, py: Python, action: &PyAny) -> PyResult<(Py<PyArray1<f32>>, f32, bool, PyObject)> {
+        // Start batch processing if needed (BEFORE checking if we should advance time)
+        // This ensures we don't advance time when there are jobs waiting to be scheduled
+        if self.batch_processing_queue.is_empty() && self.current_batch_index == 0 && !self.job_queue.is_empty() {
+            self.start_batch_processing();
+        }
+
         // Parse action
         let action_f64: Vec<f64> = if let Ok(arr32) = action.extract::<PyReadonlyArray1<f32>>() {
             let slice = arr32.as_slice()?;
@@ -337,14 +343,14 @@ impl ClusterSchedulerEnv {
                 "`action` must be a 1-D numpy array of float32 or float64",
             ));
         };
-        
+
         if action_f64.len() != self.num_hosts {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                format!("Action must have {} elements (one per host), got {}", 
+                format!("Action must have {} elements (one per host), got {}",
                 self.num_hosts, action_f64.len())
             ));
         }
-        
+
         // Apply scheduling decision in batch mode
         let _jobs_scheduled = if self.current_batch_index < self.batch_processing_queue.len() {
             let job = self.batch_processing_queue[self.current_batch_index].clone();
@@ -403,7 +409,7 @@ impl ClusterSchedulerEnv {
         self.process_completions();
 
         let will_advance_time = self.current_batch_index >= self.batch_processing_queue.len();
-        
+
         let total_reward = if self.current_batch_index >= self.batch_processing_queue.len() {
             self.calculate_pure_resource_utilization_reward() as f32
         } else {
@@ -532,10 +538,10 @@ impl ClusterSchedulerEnv {
                     }
                 }
             }
-            
-            // 7. Core pressure ratio 
+
+            // 7. Core pressure ratio
             self.cached_state[job_batch_idx + 6] = (total_cores_needed as f32) / (self.total_cluster_cores as f32);
-            
+
             // 8. Memory pressure ratio
             self.cached_state[job_batch_idx + 7] = (total_memory_needed as f32) / (self.total_cluster_memory as f32);
             
@@ -646,19 +652,16 @@ impl ClusterSchedulerEnv {
         
         // Calculate average waiting time for ALL jobs in episode (completed + currently waiting)
         let mut total_current_waiting_time = 0.0;
-        
-        // Add waiting time for jobs currently in batch queue
-        for job in &self.batch_processing_queue {
-            let waiting_time = self.current_time as f64 - job.submission_time;
-            total_current_waiting_time += waiting_time;
-        }
-        
+
+        // Don't count jobs in batch_processing_queue - they may have been scheduled already
+        // Only count jobs that are actually still waiting
+
         for job in &self.job_queue {
             let waiting_time = self.current_time as f64 - job.submission_time;
             total_current_waiting_time += waiting_time;
         }
-        
-        // Add waiting time for jobs in buckets (includes deferred)
+
+        // Add waiting time for jobs in buckets (includes deferred and unscheduled jobs)
         for bucket in &self.job_buckets {
             for job in &bucket.jobs {
                 let waiting_time = self.current_time as f64 - job.submission_time;
@@ -903,7 +906,7 @@ impl ClusterSchedulerEnv {
         while let Some(job) = self.job_queue.pop_front() {
             self.add_job_to_bucket(job);
         }
-        
+
         // Build batch processing queue from buckets (in bucket creation order)
         // This includes both new and deferred jobs, maintaining FCFS within each bucket
         self.batch_processing_queue.clear();

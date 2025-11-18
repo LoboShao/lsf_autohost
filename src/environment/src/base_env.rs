@@ -16,6 +16,8 @@ pub struct JobBucket {
     pub jobs: VecDeque<Job>,
     // Shared host priorities for all jobs in this bucket
     pub host_priorities: Option<Vec<f32>>,
+    // Number of jobs dispatched from this bucket in current cycle
+    pub dispatched_count: usize,
 }
 
 /// Base environment with shared functionality for all scheduling environments
@@ -44,8 +46,14 @@ pub struct BaseClusterEnv {
 
     // Job management
     pub job_queue: VecDeque<Job>,
-    pub batch_processing_queue: VecDeque<Job>,
-    pub job_buckets: Vec<JobBucket>,  // Bucket scheduling (LSF-style)
+    pub current_bucket_index: usize,  // Which bucket we're currently scheduling (includes empties)
+    pub buckets_processed: usize,  // Number of non-empty buckets processed (for batch progress)
+    pub jobs_processed_in_batch: usize,  // Total jobs processed so far in this batch (for batch progress)
+    pub total_jobs_in_current_batch: usize,  // Total jobs when batch started (for queue pressure)
+    pub total_cores_in_current_batch: u32,  // Total cores needed by all jobs in batch (for resource pressure)
+    pub total_memory_in_current_batch: u32,  // Total memory needed by all jobs in batch (for resource pressure)
+    pub scheduling_attempts_this_batch: usize,
+    pub job_buckets: Vec<JobBucket>,  // Bucket scheduling (LSF-style) - immutable during batch!
     pub active_jobs: HashMap<u32, Job>,
     pub completion_heap: BinaryHeap<CompletionEvent>,
 
@@ -144,7 +152,13 @@ impl BaseClusterEnv {
             memory_util_sum: 0.0,
             last_stats_update_time: 0,
             job_queue: VecDeque::new(),
-            batch_processing_queue: VecDeque::new(),
+            current_bucket_index: 0,
+            buckets_processed: 0,
+            jobs_processed_in_batch: 0,
+            total_jobs_in_current_batch: 0,
+            total_cores_in_current_batch: 0,
+            total_memory_in_current_batch: 0,
+            scheduling_attempts_this_batch: 0,
             job_buckets: Vec::new(),
             active_jobs: HashMap::new(),
             completion_heap: BinaryHeap::new(),
@@ -214,7 +228,13 @@ impl BaseClusterEnv {
 
         // Clear queues and jobs
         self.job_queue.clear();
-        self.batch_processing_queue.clear();
+        self.current_bucket_index = 0;
+        self.buckets_processed = 0;
+        self.jobs_processed_in_batch = 0;
+        self.total_jobs_in_current_batch = 0;
+        self.total_cores_in_current_batch = 0;
+        self.total_memory_in_current_batch = 0;
+        self.scheduling_attempts_this_batch = 0;
         self.job_buckets.clear();
         self.active_jobs.clear();
         self.completion_heap.clear();
@@ -561,23 +581,94 @@ impl BaseClusterEnv {
         self.memory_util_sum += avg_memory_util as f64;
     }
 
-    /// Start batch processing (collect all jobs for scheduling)
+    /// Start batch processing (collect all jobs into buckets for scheduling)
     pub fn start_batch_processing(&mut self) {
-        // Move all jobs from queue to batch processing
+        // Add new jobs from job_queue to buckets
         while let Some(job) = self.job_queue.pop_front() {
-            self.batch_processing_queue.push_back(job);
+            self.add_job_to_bucket(job);
+        }
+
+        // Count total jobs and resources in all buckets (equivalent to batch_processing_queue in env.rs)
+        self.total_jobs_in_current_batch = 0;
+        self.total_cores_in_current_batch = 0;
+        self.total_memory_in_current_batch = 0;
+
+        for bucket in &self.job_buckets {
+            for job in &bucket.jobs {
+                self.total_jobs_in_current_batch += 1;
+                self.total_cores_in_current_batch += job.cores_required;
+                self.total_memory_in_current_batch += job.memory_required;
+            }
+        }
+
+        // Reset dispatch counters from previous batch
+        for bucket in &mut self.job_buckets {
+            bucket.dispatched_count = 0;
+        }
+
+        // Reset indices to start from first bucket
+        self.current_bucket_index = 0;
+        self.buckets_processed = 0;
+        self.jobs_processed_in_batch = 0;
+        self.scheduling_attempts_this_batch = 0;
+    }
+
+    /// Finish batch processing (cleanup after batch completes)
+    pub fn finish_batch_processing(&mut self) {
+        // Jobs are already removed from buckets when scheduled (matching env.rs behavior)
+        // Just reset priorities and clean up
+        for bucket in &mut self.job_buckets {
+            bucket.dispatched_count = 0;  // Reset counter for next batch
+            bucket.host_priorities = None;  // Clear priorities for next batch
+        }
+
+        // Remove empty buckets
+        self.job_buckets.retain(|bucket| !bucket.jobs.is_empty());
+
+        // Reset indices
+        self.current_bucket_index = 0;
+        self.buckets_processed = 0;
+        self.jobs_processed_in_batch = 0;
+        self.total_jobs_in_current_batch = 0;
+        self.total_cores_in_current_batch = 0;
+        self.total_memory_in_current_batch = 0;
+        self.scheduling_attempts_this_batch = 0;
+    }
+
+    /// Simulate job submissions - start batch processing if needed
+    pub fn simulate_job_submissions(&mut self) {
+        // Batch scheduling mode: Start batch processing if no current batch
+        // Check if batch finished (total_jobs_in_current_batch is 0 means no active batch)
+        if self.total_jobs_in_current_batch == 0 && self.current_bucket_index == 0 {
+            self.start_batch_processing();
         }
     }
 
-    /// Get the next job to be dispatched - Default: FIFO policy
-    /// Child classes can override this for different job ordering policies
-    pub fn get_next_job(&self) -> Option<&Job> {
-        self.batch_processing_queue.front()
+    /// Advance current_bucket_index to the next non-empty bucket
+    pub fn skip_empty_buckets(&mut self) {
+        while self.current_bucket_index < self.job_buckets.len()
+              && self.job_buckets[self.current_bucket_index].jobs.is_empty() {
+            self.current_bucket_index += 1;
+        }
     }
 
-    /// Get the next job and remove it from queue - Default: FIFO policy
-    pub fn pop_next_job(&mut self) -> Option<Job> {
-        self.batch_processing_queue.pop_front()
+    /// Get the current job being scheduled from current bucket
+    /// Returns the first job from the current bucket (assumes empty buckets already skipped)
+    pub fn get_current_job(&self) -> Option<&Job> {
+        if self.current_bucket_index < self.job_buckets.len() {
+            self.job_buckets[self.current_bucket_index].jobs.front()
+        } else {
+            None
+        }
+    }
+
+    /// Get reference to current bucket being scheduled
+    pub fn get_current_bucket(&self) -> Option<&JobBucket> {
+        if self.current_bucket_index < self.job_buckets.len() {
+            Some(&self.job_buckets[self.current_bucket_index])
+        } else {
+            None
+        }
     }
 
     /// Select host for a job - Default: First available host
@@ -611,7 +702,7 @@ impl BaseClusterEnv {
 
         let all_complete = no_more_jobs
             && self.job_queue.is_empty()
-            && self.batch_processing_queue.is_empty()
+            && self.job_buckets.is_empty()
             && self.active_jobs.is_empty();
 
         all_complete
@@ -696,6 +787,7 @@ impl BaseClusterEnv {
                     bucket_key: key,
                     jobs: VecDeque::new(),
                     host_priorities: None,
+                    dispatched_count: 0,
                 };
                 new_bucket.jobs.push_back(job);
                 self.job_buckets.push(new_bucket);
@@ -720,17 +812,13 @@ impl BaseClusterEnv {
         // Calculate average waiting time
         let mut total_current_waiting_time = 0.0;
 
-        for job in &self.batch_processing_queue {
-            let waiting_time = self.current_time as f64 - job.submission_time;
-            total_current_waiting_time += waiting_time;
-        }
-
+        // Jobs in main queue (not yet bucketed)
         for job in &self.job_queue {
             let waiting_time = self.current_time as f64 - job.submission_time;
             total_current_waiting_time += waiting_time;
         }
 
-        // Add waiting time for jobs in buckets (includes deferred)
+        // Add waiting time for jobs in buckets (includes all pending/deferred jobs)
         for bucket in &self.job_buckets {
             for job in &bucket.jobs {
                 let waiting_time = self.current_time as f64 - job.submission_time;

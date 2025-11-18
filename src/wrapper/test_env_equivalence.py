@@ -106,7 +106,19 @@ def compare_environments(seed=42, num_steps=100, num_hosts=50, max_time=100):
         # Check for significant differences
         if obs_diff > 1e-5:
             print(f"❌ Step {i+1}: Observations differ by {obs_diff:.10f} (> 1e-5)")
-            print(f"   First differing values: obs1={obs1[:5]}, obs2={obs2[:5]}")
+
+            # Find where the differences are
+            diff_array = np.abs(obs1 - obs2)
+            diff_indices = np.where(diff_array > 1e-5)[0]
+
+            print(f"   Number of differing elements: {len(diff_indices)}")
+            print(f"   Differing indices: {diff_indices[:10]}")  # Show first 10
+
+            # Show values at those indices
+            for idx in diff_indices[:5]:  # Show first 5 differences
+                print(f"   Index {idx}: obs1={obs1[idx]:.10f}, obs2={obs2[idx]:.10f}, diff={diff_array[idx]:.10f}")
+
+            print(f"   First 10 values: obs1={obs1[:10]}, obs2={obs2[:10]}")
             return False
 
         if reward_diff > 1e-5:
