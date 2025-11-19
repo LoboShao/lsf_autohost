@@ -463,16 +463,16 @@ impl ClusterSchedulerEnv {
         self.cached_state.fill(0.0);
         
         // Fill state in format: [host1_avail_cores_norm, host1_avail_mem_norm, host2_avail_cores_norm, ...]
-        // Using available resources normalized by environment max values
-        let max_cores = self.host_cores_range.1 as f32;
-        let max_memory = self.host_memory_range.1 as f32;
-        
+        // Using historical utilization from previous cycle to simulate real LSF behavior
         for i in 0..self.num_hosts {
             let base_idx = i * 2;
-            // Normalized available cores (0 = no cores available, 1 = max possible cores available)
-            self.cached_state[base_idx] = self.hosts[i].available_cores as f32 / max_cores;
-            // Normalized available memory (0 = no memory available, 1 = max possible memory available)
-            self.cached_state[base_idx + 1] = self.hosts[i].available_memory as f32 / max_memory;
+            // Use historical utilization (from previous cycle) instead of real-time
+            let core_util = self.hosts[i].get_core_utilization();
+            let mem_util = self.hosts[i].get_memory_utilization();
+            // Convert utilization to availability ratio (0-1)
+            // (0 = no cores available, 1 = all cores available)
+            self.cached_state[base_idx] = 1.0 - core_util;
+            self.cached_state[base_idx + 1] = 1.0 - mem_util;
         }
         
         // Enhanced job info (7 features) - at end of state vector

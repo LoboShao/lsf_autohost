@@ -1,16 +1,16 @@
 import gymnasium as gym
 from gymnasium import spaces
 import numpy as np
-from lsf_env_rust import HostSortingEnv
+from lsf_env_rust import JobOrderingEnv
 from typing import List, Any, Tuple
 
 
-class HostSortingEnvWrapper(gym.Env):
-    """Gymnasium wrapper for the refactored host sorting environment.
+class JobOrderingEnvWrapper(gym.Env):
+    """Gymnasium wrapper for the job ordering environment.
 
     Provides a standard Gymnasium interface to the high-performance Rust-based
-    cluster simulation for training RL agents on job scheduling tasks.
-    This uses the refactored modular design with BaseClusterEnv + HostSortingEnv.
+    cluster simulation for training RL agents on job bucket prioritization.
+    Uses heuristic (first-available) for host selection and RL for bucket ordering.
     """
 
     def __init__(self, **kwargs):
@@ -20,25 +20,26 @@ class HostSortingEnvWrapper(gym.Env):
         self._constructor_kwargs = kwargs.copy()
 
         # Create the Rust environment
-        self.rust_env = HostSortingEnv(**kwargs)
+        self.rust_env = JobOrderingEnv(**kwargs)
 
         # Store environment parameters
         self.num_hosts = kwargs.get('num_hosts', 1000)
-        self.max_jobs_scheduled_per_step = kwargs.get('max_jobs_scheduled_per_step', 20)
+        self.max_buckets = kwargs.get('max_buckets', 100)
 
-        # Define action space: priority values for each host (0-1)
+        # Define action space: priority values for each bucket (0-1)
         self.action_space = spaces.Box(
             low=0.0,
             high=1.0,
-            shape=(self.num_hosts,),
+            shape=(self.max_buckets,),
             dtype=np.float32
         )
 
-        # Define observation space - simplified to 2 features per host + 8 job features
-        state_size = self.num_hosts * 2 + 8
+        # Define observation space - max_buckets * 2 (cores + count) + 2 global features
+        # Format: [bucket0_cores, bucket0_count, ..., available_cores_ratio, available_mem_ratio]
+        state_size = self.max_buckets * 2 + 2
         self.observation_space = spaces.Box(
             low=0.0,
-            high=1.0,
+            high=np.inf,  # Job count can be > 1.0
             shape=(state_size,),
             dtype=np.float32
         )
@@ -96,21 +97,21 @@ class HostSortingEnvWrapper(gym.Env):
             seed: Seed for deterministic testing
 
         Returns:
-            New HostSortingEnvWrapper instance with same config but specified seed
+            New JobOrderingEnvWrapper instance with same config but specified seed
         """
         # Use the original constructor kwargs with updated seed
         kwargs = self._constructor_kwargs.copy()
         kwargs['seed'] = seed  # Override seed for deterministic testing
 
-        return HostSortingEnvWrapper(**kwargs)
+        return JobOrderingEnvWrapper(**kwargs)
 
 
-class VectorizedHostSortingEnv:
-    """Simple vectorized environment for parallel LSF training with HostSortingEnv."""
+class VectorizedJobOrderingEnv:
+    """Simple vectorized environment for parallel LSF training with JobOrderingEnv."""
 
     def __init__(self, num_envs: int, **kwargs):
         self.num_envs = num_envs
-        self.envs = [HostSortingEnvWrapper(**kwargs) for _ in range(num_envs)]
+        self.envs = [JobOrderingEnvWrapper(**kwargs) for _ in range(num_envs)]
 
         # Get observation and action spaces from first environment
         self.single_observation_space = self.envs[0].observation_space
@@ -185,39 +186,42 @@ class VectorizedHostSortingEnv:
                 env.set_random_seed(None)
 
 
-def make_host_sorting_env(num_envs: int = 1, **kwargs):
+def make_job_ordering_env(num_envs: int = 1, **kwargs):
     """
-    Create a host sorting scheduler environment using the refactored design.
+    Create a job ordering scheduler environment.
 
     Args:
         num_envs: Number of parallel environments (default: 1)
-        **kwargs: Arguments passed to HostSortingEnv
+        **kwargs: Arguments passed to JobOrderingEnv
 
     Returns:
         gym.Env: The environment instance (vectorized if num_envs > 1)
     """
     if num_envs == 1:
-        return HostSortingEnvWrapper(**kwargs)
+        return JobOrderingEnvWrapper(**kwargs)
     else:
-        return VectorizedHostSortingEnv(num_envs, **kwargs)
+        return VectorizedJobOrderingEnv(num_envs, **kwargs)
 
 
 if __name__ == "__main__":
     print("Testing direct Rust env call:")
-    rust_env = HostSortingEnv(num_hosts=10, max_time=10, seed=42)
+    rust_env = JobOrderingEnv(num_hosts=10, max_buckets=20, max_time=10, seed=42)
     obs = rust_env.reset()
     print(f"Initial obs shape: {obs.shape}")
     print(f"Initial obs (first 20 values): {obs[:20]}")
 
+    max_buckets = rust_env.get_max_buckets()
+    print(f"Max buckets: {max_buckets}")
+
     for i in range(5):
-        action = np.random.random(10).astype(np.float32)
+        action = np.random.random(max_buckets).astype(np.float32)
         obs, reward, done, info = rust_env.step(action)
         print(f"[RustEnv] Step {i+1}: reward={reward}, done={done}")
         if done:
             break
 
     print("\nTesting Gym wrapper:")
-    env = HostSortingEnvWrapper(num_hosts=10, max_time=10, seed=42)
+    env = JobOrderingEnvWrapper(num_hosts=10, max_buckets=20, max_time=10, seed=42)
     obs, info = env.reset()
     print(f"Initial obs shape: {obs.shape}")
     print(f"Initial obs (first 20 values): {obs[:20]}")

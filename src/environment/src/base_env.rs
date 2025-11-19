@@ -9,6 +9,54 @@ use crate::job::{Job, JobStatus};
 use crate::host::Host;
 use crate::event::CompletionEvent;
 
+/// Configuration for cluster environment
+/// All child environments (HostSortingEnv, JobOrderingEnv) use this config
+#[derive(Clone)]
+pub struct ClusterConfig {
+    pub num_hosts: usize,
+    pub max_queue_length: Option<usize>,
+    pub host_cores_range: (u32, u32),
+    pub host_memory_range: (u32, u32),
+    pub job_cores_range: (u32, u32),
+    pub job_memory_range: (u32, u32),
+    pub job_duration_range: (u32, u32),
+    pub max_jobs_per_step: usize,
+    pub max_time: usize,
+    pub use_skewed_arrivals: bool,
+    pub seed: Option<u64>,
+}
+
+impl ClusterConfig {
+    /// Create new config with all parameters
+    pub fn new(
+        num_hosts: usize,
+        max_queue_length: Option<usize>,
+        host_cores_range: (u32, u32),
+        host_memory_range: (u32, u32),
+        job_cores_range: (u32, u32),
+        job_memory_range: (u32, u32),
+        job_duration_range: (u32, u32),
+        max_jobs_per_step: usize,
+        max_time: usize,
+        use_skewed_arrivals: bool,
+        seed: Option<u64>,
+    ) -> Self {
+        ClusterConfig {
+            num_hosts,
+            max_queue_length,
+            host_cores_range,
+            host_memory_range,
+            job_cores_range,
+            job_memory_range,
+            job_duration_range,
+            max_jobs_per_step,
+            max_time,
+            use_skewed_arrivals,
+            seed,
+        }
+    }
+}
+
 /// Bucket for grouping jobs with same resource requirements
 #[derive(Debug, Clone)]
 pub struct JobBucket {
@@ -85,10 +133,34 @@ pub struct BaseClusterEnv {
     // Cluster resource totals (cached)
     pub total_cluster_cores: u32,
     pub total_cluster_memory: u32,
+
+    // Cycle-level resource snapshot (cached at start of each scheduling cycle)
+    pub cycle_available_cores: u32,
+    pub cycle_available_memory: u32,
 }
 
 impl BaseClusterEnv {
-    pub fn new(
+    // ==================== Configuration & Construction ====================
+
+    /// Create new BaseClusterEnv from config
+    pub fn from_config(config: &ClusterConfig) -> Self {
+        Self::new(
+            config.num_hosts,
+            config.max_queue_length,
+            config.host_cores_range,
+            config.host_memory_range,
+            config.job_cores_range,
+            config.job_memory_range,
+            config.job_duration_range,
+            config.max_jobs_per_step,
+            config.max_time,
+            config.use_skewed_arrivals,
+            config.seed,
+        )
+    }
+
+    /// Create new BaseClusterEnv (internal constructor)
+    fn new(
         num_hosts: usize,
         max_queue_length: Option<usize>,
         host_cores_range: (u32, u32),
@@ -181,6 +253,8 @@ impl BaseClusterEnv {
             original_seed,
             total_cluster_cores,
             total_cluster_memory,
+            cycle_available_cores: total_cluster_cores,
+            cycle_available_memory: total_cluster_memory,
         }
     }
 
@@ -225,6 +299,10 @@ impl BaseClusterEnv {
         // Recalculate total cluster resources
         self.total_cluster_cores = self.hosts.iter().map(|h| h.total_cores).sum();
         self.total_cluster_memory = self.hosts.iter().map(|h| h.total_memory).sum();
+
+        // Reset cycle-level snapshots to match new totals
+        self.cycle_available_cores = self.total_cluster_cores;
+        self.cycle_available_memory = self.total_cluster_memory;
 
         // Clear queues and jobs
         self.job_queue.clear();
@@ -281,6 +359,8 @@ impl BaseClusterEnv {
             self.total_jobs_in_pool = total_jobs_in_pool;
         }
     }
+
+    // ==================== Job Generation & Host Configuration ====================
 
     /// Generate deterministic job schedule
     pub fn generate_deterministic_job_schedule(
@@ -525,61 +605,7 @@ impl BaseClusterEnv {
         }
     }
 
-    /// Process job completions
-    pub fn process_completions(&mut self) {
-        while let Some(event) = self.completion_heap.peek() {
-            if event.completion_time > self.current_time as f64 {
-                break;
-            }
-
-            let event = self.completion_heap.pop().unwrap();
-
-            if let Some(mut completed_job) = self.active_jobs.remove(&event.job_id) {
-                completed_job.status = JobStatus::Completed;
-                completed_job.end_time = Some(self.current_time as f64);
-
-                // Note: Waiting time is tracked when job is scheduled, not when it completes
-                // This matches the original env_backup.rs behavior
-
-                // Release resources from host
-                if let Some(host_id) = completed_job.assigned_host {
-                    self.hosts[host_id].release_job(&completed_job);
-                }
-
-                self.total_jobs_completed += 1;
-                self.jobs_completed_this_step += 1;
-            }
-        }
-    }
-
-    /// Update host utilization metrics
-    pub fn update_host_utilization(&mut self) {
-        // Only update once per second
-        if self.current_time > self.last_stats_update_time {
-            // Update all hosts and get utilization values directly
-            for (i, host) in self.hosts.iter_mut().enumerate() {
-                let (core_util, memory_util) = host.update_utilization_history();
-                self.host_core_utils[i] = core_util;
-                self.host_memory_utils[i] = memory_util;
-            }
-
-            // Update time-based statistics
-            self.update_utilization_statistics_optimized(self.current_time);
-        }
-    }
-
-    fn update_utilization_statistics_optimized(&mut self, current_time: u64) {
-        // Time check already done in caller, just update statistics
-        self.last_stats_update_time = current_time;
-
-        // Calculate current average utilization across all hosts
-        let avg_core_util = self.host_core_utils.iter().sum::<f32>() / self.num_hosts as f32;
-        let avg_memory_util = self.host_memory_utils.iter().sum::<f32>() / self.num_hosts as f32;
-
-        // Update running statistics
-        self.core_util_sum += avg_core_util as f64;
-        self.memory_util_sum += avg_memory_util as f64;
-    }
+    // ==================== Batch & Bucket Management ====================
 
     /// Start batch processing (collect all jobs into buckets for scheduling)
     pub fn start_batch_processing(&mut self) {
@@ -587,6 +613,25 @@ impl BaseClusterEnv {
         while let Some(job) = self.job_queue.pop_front() {
             self.add_job_to_bucket(job);
         }
+
+        // Snapshot cluster available resources from historical utilization (for cycle-level state caching)
+        // This simulates real LSF behavior where scheduling decisions see a snapshot from the previous cycle
+        // Use historical utilization (from previous time step) instead of current real-time values
+        self.cycle_available_cores = self.hosts.iter()
+            .map(|h| {
+                let util = h.get_core_utilization(); // Historical utilization
+                let available_ratio = 1.0 - util;
+                (available_ratio * h.total_cores as f32) as u32
+            })
+            .sum();
+
+        self.cycle_available_memory = self.hosts.iter()
+            .map(|h| {
+                let util = h.get_memory_utilization(); // Historical utilization
+                let available_ratio = 1.0 - util;
+                (available_ratio * h.total_memory as f32) as u32
+            })
+            .sum();
 
         // Count total jobs and resources in all buckets (equivalent to batch_processing_queue in env.rs)
         self.total_jobs_in_current_batch = 0;
@@ -671,6 +716,47 @@ impl BaseClusterEnv {
         }
     }
 
+    /// Generate bucket key for a job
+    /// Current strategy: unique key per job (for fine-grained control)
+    /// Can be modified to group by resources: format!("c_{}_m_{}", cores, memory)
+    pub fn generate_bucket_key(job_id: u32, _cores: u32, _memory: u32) -> String {
+        // Flexible function for generating bucket keys
+        // Current: Each job gets its own bucket for maximum agent control
+        format!("job_{}", job_id)
+        // Alternative strategies (commented out):
+        // format!("c_{}_m_{}", _cores, _memory)  // Group by exact resources
+        // format!("size_{}", if cores <= 4 { "small" } else if cores <= 16 { "medium" } else { "large" })
+    }
+
+    /// Add a job to the appropriate bucket
+    pub fn add_job_to_bucket(&mut self, job: Job) {
+        // Generate key for this job
+        let key = Self::generate_bucket_key(job.id, job.cores_required, job.memory_required);
+
+        // Find existing bucket or create new one
+        let bucket_index = self.job_buckets.iter().position(|b| b.bucket_key == key);
+
+        match bucket_index {
+            Some(idx) => {
+                // Add to existing bucket
+                self.job_buckets[idx].jobs.push_back(job);
+            }
+            None => {
+                // Create new bucket at the end (maintains creation order)
+                let mut new_bucket = JobBucket {
+                    bucket_key: key,
+                    jobs: VecDeque::new(),
+                    host_priorities: None,
+                    dispatched_count: 0,
+                };
+                new_bucket.jobs.push_back(job);
+                self.job_buckets.push(new_bucket);
+            }
+        }
+    }
+
+    // ==================== Job Scheduling & Execution ====================
+
     /// Select host for a job - Default: First available host
     /// Returns host index if found, None otherwise
     /// Child classes can override this for different host selection policies
@@ -695,33 +781,101 @@ impl BaseClusterEnv {
             .collect()
     }
 
-    /// Check if environment is done
-    pub fn is_done(&self) -> bool {
-        let no_more_jobs = self.current_time >= self.max_time as u64
-            && self.jobs_moved_to_queue >= self.total_jobs_in_pool;
+    /// Schedule a job using host priorities (agent-provided or heuristic-based)
+    /// Returns number of jobs scheduled (0 or 1)
+    pub fn schedule_job_with_host_priorities(&mut self, job: Job, host_priorities: &[f64]) -> usize {
+        // Check if job can be scheduled on any host
+        let can_be_scheduled = self.hosts.iter().any(|host| {
+            host.total_cores >= job.cores_required && host.total_memory >= job.memory_required
+        });
 
-        let all_complete = no_more_jobs
-            && self.job_queue.is_empty()
-            && self.job_buckets.is_empty()
-            && self.active_jobs.is_empty();
-
-        all_complete
-    }
-
-    /// Calculate basic resource utilization
-    pub fn calculate_utilization(&self) -> f32 {
-        let mut used_cores = 0;
-        let mut used_memory = 0;
-
-        for host in &self.hosts {
-            used_cores += host.total_cores - host.available_cores;
-            used_memory += host.total_memory - host.available_memory;
+        if !can_be_scheduled {
+            println!("WARNING: Job {} cannot be scheduled on any host", job.id);
+            return 0;
         }
 
-        let core_util = used_cores as f32 / self.total_cluster_cores as f32;
-        let mem_util = used_memory as f32 / self.total_cluster_memory as f32;
+        // Sort hosts by priorities (descending)
+        let mut sorted_host_priorities: Vec<(usize, f64)> = host_priorities.iter()
+            .enumerate()
+            .map(|(i, &p)| (i, p))
+            .collect();
+        sorted_host_priorities.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
 
-        (core_util + mem_util) / 2.0
+        // Try single-host scheduling with prioritized hosts
+        for &(host_idx, _) in &sorted_host_priorities {
+            if self.try_single_host_scheduling(&job, host_idx) {
+                // Job scheduled successfully
+                return 1;
+            }
+        }
+
+        // Job couldn't be scheduled - it stays in its bucket
+        // Update deferred count for job in bucket
+        let job_id = job.id;
+        let job_bucket_key = job.bucket_key.clone();
+        for bucket in &mut self.job_buckets {
+            if bucket.bucket_key == job_bucket_key {
+                for bucket_job in &mut bucket.jobs {
+                    if bucket_job.id == job_id {
+                        bucket_job.deferred_count += 1;
+                        self.total_jobs_deferred += 1;
+                        break;
+                    }
+                }
+                break;
+            }
+        }
+
+        0
+    }
+
+    /// Process a selected bucket by scheduling its jobs with given host priorities
+    /// This is the core bucket processing logic shared across all environments
+    /// Returns (jobs_scheduled, finishing_batch_now)
+    pub fn process_selected_bucket(&mut self, bucket_idx: usize, host_priorities: &[f64]) -> (usize, bool) {
+        // Get jobs from selected bucket
+        let bucket = &self.job_buckets[bucket_idx];
+        let jobs_to_schedule: Vec<Job> = bucket.jobs.iter().cloned().collect();
+
+        // Track the original bucket size (before removing any jobs)
+        let original_bucket_size = jobs_to_schedule.len();
+
+        // Try to schedule each job in the bucket using the same host priorities
+        let mut bucket_scheduled = 0;
+        let mut scheduled_job_ids = Vec::new();
+        for bucket_job in jobs_to_schedule {
+            let job_id = bucket_job.id;
+            let scheduled = self.schedule_job_with_host_priorities(bucket_job, host_priorities);
+            if scheduled > 0 {
+                bucket_scheduled += 1;
+                scheduled_job_ids.push(job_id);
+            } else {
+                // If one job can't be scheduled, stop trying for this bucket
+                break;
+            }
+        }
+
+        // Remove scheduled jobs immediately from bucket
+        for job_id in scheduled_job_ids {
+            self.job_buckets[bucket_idx].jobs.retain(|j| j.id != job_id);
+        }
+
+        // Increment attempts counter (we made one decision for the entire bucket)
+        self.scheduling_attempts_this_batch += 1;
+
+        // Count this as a processed bucket (for batch progress tracking)
+        self.buckets_processed += 1;
+
+        // Increment jobs processed counter by the ORIGINAL number of jobs in this bucket
+        self.jobs_processed_in_batch += original_bucket_size;
+
+        // Move to next bucket
+        self.current_bucket_index += 1;
+
+        // Check if we've finished all non-empty buckets
+        let finishing_batch_now = self.total_jobs_in_current_batch > 0 && self.get_current_job().is_none();
+
+        (bucket_scheduled, finishing_batch_now)
     }
 
     /// Try single-host scheduling
@@ -756,43 +910,173 @@ impl BaseClusterEnv {
         false
     }
 
-    /// Generate bucket key for a job
-    /// Current strategy: unique key per job (for fine-grained control)
-    /// Can be modified to group by resources: format!("c_{}_m_{}", cores, memory)
-    pub fn generate_bucket_key(job_id: u32, _cores: u32, _memory: u32) -> String {
-        // Flexible function for generating bucket keys
-        // Current: Each job gets its own bucket for maximum agent control
-        format!("job_{}", job_id)
-        // Alternative strategies (commented out):
-        // format!("c_{}_m_{}", cores, memory)  // Group by exact resources
-        // format!("size_{}", if cores <= 4 { "small" } else if cores <= 16 { "medium" } else { "large" })
-    }
-
-    /// Add a job to the appropriate bucket
-    pub fn add_job_to_bucket(&mut self, job: Job) {
-        // Generate key for this job
-        let key = Self::generate_bucket_key(job.id, job.cores_required, job.memory_required);
-
-        // Find existing bucket or create new one
-        let bucket_index = self.job_buckets.iter().position(|b| b.bucket_key == key);
-
-        match bucket_index {
-            Some(idx) => {
-                // Add to existing bucket
-                self.job_buckets[idx].jobs.push_back(job);
+    /// Process job completions
+    pub fn process_completions(&mut self) {
+        while let Some(event) = self.completion_heap.peek() {
+            if event.completion_time > self.current_time as f64 {
+                break;
             }
-            None => {
-                // Create new bucket at the end (maintains creation order)
-                let mut new_bucket = JobBucket {
-                    bucket_key: key,
-                    jobs: VecDeque::new(),
-                    host_priorities: None,
-                    dispatched_count: 0,
-                };
-                new_bucket.jobs.push_back(job);
-                self.job_buckets.push(new_bucket);
+
+            let event = self.completion_heap.pop().unwrap();
+
+            if let Some(mut completed_job) = self.active_jobs.remove(&event.job_id) {
+                completed_job.status = JobStatus::Completed;
+                completed_job.end_time = Some(self.current_time as f64);
+
+                // Release resources from host
+                if let Some(host_id) = completed_job.assigned_host {
+                    self.hosts[host_id].release_job(&completed_job);
+                }
+
+                self.total_jobs_completed += 1;
+                self.jobs_completed_this_step += 1;
             }
         }
+    }
+
+    // ==================== Resource Tracking ====================
+
+    /// Update host utilization metrics
+    pub fn update_host_utilization(&mut self) {
+        // Only update once per second
+        if self.current_time > self.last_stats_update_time {
+            // Update all hosts and get utilization values directly
+            for (i, host) in self.hosts.iter_mut().enumerate() {
+                let (core_util, memory_util) = host.update_utilization_history();
+                self.host_core_utils[i] = core_util;
+                self.host_memory_utils[i] = memory_util;
+            }
+
+            // Update time-based statistics
+            self.update_utilization_statistics_optimized(self.current_time);
+        }
+    }
+
+    fn update_utilization_statistics_optimized(&mut self, current_time: u64) {
+        // Time check already done in caller, just update statistics
+        self.last_stats_update_time = current_time;
+
+        // Calculate current average utilization across all hosts
+        let avg_core_util = self.host_core_utils.iter().sum::<f32>() / self.num_hosts as f32;
+        let avg_memory_util = self.host_memory_utils.iter().sum::<f32>() / self.num_hosts as f32;
+
+        // Update running statistics
+        self.core_util_sum += avg_core_util as f64;
+        self.memory_util_sum += avg_memory_util as f64;
+    }
+
+    /// Calculate basic resource utilization
+    pub fn calculate_utilization(&self) -> f32 {
+        let mut used_cores = 0;
+        let mut used_memory = 0;
+
+        for host in &self.hosts {
+            used_cores += host.total_cores - host.available_cores;
+            used_memory += host.total_memory - host.available_memory;
+        }
+
+        let core_util = used_cores as f32 / self.total_cluster_cores as f32;
+        let mem_util = used_memory as f32 / self.total_cluster_memory as f32;
+
+        (core_util + mem_util) / 2.0
+    }
+
+    // ==================== Environment Control ====================
+
+    /// Start batch processing if needed (no active batch and jobs in queue)
+    pub fn maybe_start_batch(&mut self) {
+        if self.total_jobs_in_current_batch == 0 && !self.job_queue.is_empty() {
+            self.start_batch_processing();
+        }
+    }
+
+    /// Update environment state: finish batch if needed, reset counters, update utilization, process completions
+    pub fn update_environment_state(&mut self, finishing_batch_now: bool) {
+        if finishing_batch_now {
+            self.finish_batch_processing();
+        }
+
+        // Reset completion counter
+        self.jobs_completed_this_step = 0;
+
+        // Update utilization
+        self.update_host_utilization();
+
+        // Process completions
+        self.process_completions();
+    }
+
+    /// Advance time if conditions are met and add new jobs
+    pub fn maybe_advance_time(&mut self, will_advance_time: bool) {
+        // Check if all jobs have been generated
+        let all_jobs_generated = self.jobs_moved_to_queue >= self.total_jobs_in_pool;
+
+        // Time advancement logic
+        if will_advance_time && !all_jobs_generated {
+            self.current_time += 1;
+            // Generate new jobs for this time unit
+            self.add_new_jobs_to_queue();
+        } else if will_advance_time && all_jobs_generated {
+            // If all jobs are generated but still processing, advance time without adding jobs
+            self.current_time += 1;
+        }
+
+        // Move jobs from main queue to submission queue
+        self.simulate_job_submissions();
+
+        self.current_step += 1;
+    }
+
+    /// Check if episode is done and set makespan if needed
+    pub fn check_episode_done(&mut self) -> bool {
+        let done = self.current_time >= self.max_time as u64;
+
+        // Set makespan when episode actually ends
+        if done && self.makespan.is_none() {
+            self.makespan = Some(self.current_time);
+        }
+
+        done
+    }
+
+    /// Check if environment is done
+    pub fn is_done(&self) -> bool {
+        let no_more_jobs = self.current_time >= self.max_time as u64
+            && self.jobs_moved_to_queue >= self.total_jobs_in_pool;
+
+        let all_complete = no_more_jobs
+            && self.job_queue.is_empty()
+            && self.job_buckets.is_empty()
+            && self.active_jobs.is_empty();
+
+        all_complete
+    }
+
+    // ==================== Info & Metrics (Python API) ====================
+
+    /// Get step info (generic for all environments)
+    pub fn get_step_info(&self, py: Python) -> PyResult<PyObject> {
+        let info = PyDict::new(py);
+        info.set_item("queue_length", self.job_queue.len())?;
+
+        // Count total jobs in buckets
+        let bucket_jobs_count: usize = self.job_buckets.iter().map(|b| b.jobs.len()).sum();
+        info.set_item("bucket_jobs_count", bucket_jobs_count)?;
+        info.set_item("num_buckets", self.job_buckets.len())?;
+
+        info.set_item("active_jobs", self.active_jobs.len())?;
+        info.set_item("needs_decision", self.get_current_job().is_some())?;
+        info.set_item("total_jobs_generated", self.total_jobs_generated)?;
+        info.set_item("total_jobs_completed", self.total_jobs_completed)?;
+        info.set_item("current_time", self.current_time)?;
+        info.set_item("current_step", self.current_step)?;
+        info.set_item("total_jobs_deferred", self.total_jobs_deferred)?;
+
+        if let Some(makespan_time) = self.makespan {
+            info.set_item("makespan", makespan_time)?;
+        }
+
+        Ok(info.into())
     }
 
     /// Get basic metrics
@@ -847,5 +1131,62 @@ impl BaseClusterEnv {
         metrics.set_item("avg_host_memory_utilization", avg_memory_util)?;
 
         Ok(metrics.into())
+    }
+
+    /// Get host configurations
+    pub fn get_host_configs(&self, py: Python) -> PyResult<PyObject> {
+        let hosts_list = pyo3::types::PyList::empty(py);
+
+        for (i, host) in self.hosts.iter().enumerate() {
+            let host_dict = pyo3::types::PyDict::new(py);
+            host_dict.set_item("host_id", i)?;
+            host_dict.set_item("total_cores", host.total_cores)?;
+            host_dict.set_item("total_memory", host.total_memory)?;
+            hosts_list.append(host_dict)?;
+        }
+
+        Ok(hosts_list.to_object(py))
+    }
+
+    /// Get job schedule information
+    pub fn get_job_schedule(&self, py: Python) -> PyResult<PyObject> {
+        let schedule_dict = pyo3::types::PyDict::new(py);
+
+        schedule_dict.set_item("job_arrival_schedule", self.job_arrival_schedule.clone())?;
+        schedule_dict.set_item("job_cores_schedule", self.job_cores_schedule.clone())?;
+        schedule_dict.set_item("job_memory_schedule", self.job_memory_schedule.clone())?;
+        schedule_dict.set_item("job_duration_schedule", self.job_duration_schedule.clone())?;
+        schedule_dict.set_item("total_jobs_in_pool", self.total_jobs_in_pool)?;
+        schedule_dict.set_item("max_time", self.max_time)?;
+        schedule_dict.set_item("max_jobs_per_step", self.max_jobs_per_step)?;
+        schedule_dict.set_item("num_hosts", self.num_hosts)?;
+        schedule_dict.set_item("host_cores_range", self.host_cores_range)?;
+        schedule_dict.set_item("host_memory_range", self.host_memory_range)?;
+        schedule_dict.set_item("job_cores_range", self.job_cores_range)?;
+        schedule_dict.set_item("job_memory_range", self.job_memory_range)?;
+        schedule_dict.set_item("job_duration_range", self.job_duration_range)?;
+
+        Ok(schedule_dict.to_object(py))
+    }
+
+    /// Get cluster resource information
+    pub fn get_cluster_info(&self, py: Python) -> PyResult<PyObject> {
+        let info_dict = pyo3::types::PyDict::new(py);
+        info_dict.set_item("total_cluster_cores", self.total_cluster_cores)?;
+        info_dict.set_item("total_cluster_memory", self.total_cluster_memory)?;
+        info_dict.set_item("num_hosts", self.num_hosts)?;
+        info_dict.set_item("host_cores_range", self.host_cores_range)?;
+        info_dict.set_item("host_memory_range", self.host_memory_range)?;
+        Ok(info_dict.to_object(py))
+    }
+
+    /// Set random seed for the environment
+    pub fn set_random_seed(&mut self, seed: Option<u64>) {
+        self.original_seed = seed;
+        if let Some(s) = seed {
+            self.rng = rand::SeedableRng::seed_from_u64(s);
+        } else {
+            self.rng = rand::SeedableRng::from_entropy();
+        }
     }
 }

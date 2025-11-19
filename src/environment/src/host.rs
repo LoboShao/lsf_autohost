@@ -10,9 +10,9 @@ pub struct Host {
     pub available_memory: u32,
     pub running_job_ids: HashMap<u32, Job>,
     
-    // Utilization history for per-second tracking (store up to 60 seconds)
-    core_history: VecDeque<f32>, // Store past per-second core utilization values
-    memory_history: VecDeque<f32>, // Store past per-second memory utilization values
+    // Utilization history for cycle-level tracking (store only 1 value from previous cycle)
+    core_history: VecDeque<f32>, // Store previous cycle core utilization
+    memory_history: VecDeque<f32>, // Store previous cycle memory utilization
 }
 
 impl Host {
@@ -108,9 +108,9 @@ impl Host {
         // Add current utilization to history
         self.core_history.push_back(current_core_util);
         self.memory_history.push_back(current_memory_util);
-        
-        // Keep only last 60 values (60 seconds of history)
-        if self.core_history.len() > 60 {
+
+        // Keep only last 1 value (most recent cycle)
+        if self.core_history.len() > 1 {
             self.core_history.pop_front();
             self.memory_history.pop_front();
         }

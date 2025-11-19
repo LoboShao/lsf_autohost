@@ -6,7 +6,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')
 import torch
 import argparse
 import numpy as np
-from src.wrapper.gym_wrapper import make_lsf_env
+from src.wrapper.host_sorting_wrapper import make_host_sorting_env
 from src.training.attention_scheduler_model import AttentionSchedulerPolicy
 from src.training.ppo import PPOTrainer
 
@@ -70,7 +70,7 @@ def parse_args():
     parser.add_argument('--test-seeds', type=int, nargs='+', default=[42, 43, 44], help='Seeds to use for deterministic testing (e.g., --test-seeds 42 43 44)')
     
     # ================== Logging and Checkpointing ==================
-    parser.add_argument('--log-dir', type=str, default="expnew5", help='Log directory for TensorBoard logs, checkpoints, and test data')
+    parser.add_argument('--log-dir', type=str, default="host_sort1", help='Log directory for TensorBoard logs, checkpoints, and test data')
     parser.add_argument('--log-interval', type=int, default=5, help='Logging interval (updates)')
     parser.add_argument('--test-interval', type=int, default=50, help='Testing interval (updates)')
     parser.add_argument('--save-freq', type=int, default=250, help='Checkpoint save frequency (updates)')
@@ -150,7 +150,7 @@ def main() -> None:
         'seed': args.seed,
     }
     
-    env = make_lsf_env(num_envs=args.num_envs, **env_kwargs)
+    env = make_host_sorting_env(num_envs=args.num_envs, **env_kwargs)
     
     print(f"Environment created:")
     print(f"  Observation space: {env.observation_space}")
