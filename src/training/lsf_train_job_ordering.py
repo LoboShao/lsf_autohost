@@ -6,27 +6,27 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')
 import torch
 import argparse
 import numpy as np
-from src.wrapper.host_sorting_wrapper import make_host_sorting_env
-from src.training.attention_scheduler_model import AttentionSchedulerPolicy
+from src.wrapper.job_ordering_wrapper import make_job_ordering_env
 from src.training.ppo import PPOTrainer
-from src.training.utils import FirstAvailableBaseline
+from src.training.utils import FirstAvailableBaseline  # For now, can create custom later
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description='Train PPO agent on LSF scheduling environment')
-    
+    parser = argparse.ArgumentParser(description='Train PPO agent on LSF job ordering environment')
+
     # ================== Environment Configuration ==================
     parser.add_argument('--num-hosts', type=int, default=30, help='Number of hosts in the cluster')
+    parser.add_argument('--max-buckets', type=int, default=100, help='Maximum number of job buckets')
     parser.add_argument('--simulation-time', type=int, default=500, help='Simulation time in seconds for each episode')
     parser.add_argument('--max-jobs-per-step', type=int, default=3, help='Maximum jobs arriving per timestep')
     parser.add_argument('--num-envs', type=int, default=4, help='Number of parallel environments')
-    
+
     # ================== Host Resource Configuration ==================
     parser.add_argument('--host-cores-min', type=int, default=32, help='Minimum host cores')
     parser.add_argument('--host-cores-max', type=int, default=64, help='Maximum host cores')
     parser.add_argument('--host-memory-min', type=int, default=32*1024, help='Minimum host memory (MB)')
     parser.add_argument('--host-memory-max', type=int, default=64*1024, help='Maximum host memory (MB)')
-    
+
     # ================== Job Resource Configuration ==================
     parser.add_argument('--job-cores-min', type=int, default=1, help='Minimum job cores')
     parser.add_argument('--job-cores-max', type=int, default=8, help='Maximum job cores')
@@ -34,9 +34,9 @@ def parse_args():
     parser.add_argument('--job-memory-max', type=int, default=8*1024, help='Maximum job memory (MB)')
     parser.add_argument('--job-duration-min', type=int, default=30, help='Minimum job duration (seconds)')
     parser.add_argument('--job-duration-max', type=int, default=300, help='Maximum job duration (seconds)')
-    
+
     # ================== Core PPO Hyperparameters ==================
-    parser.add_argument('--total-timesteps', type=int, default=2048*4*(4096*2), help='Total training timesteps: rollout_steps × num_envs × num_updates')
+    parser.add_argument('--total-timesteps', type=int, default=2048*4*(4096*2), help='Total training timesteps')
     parser.add_argument('--rollout-steps', type=int, default=2048, help='Steps per rollout buffer')
     parser.add_argument('--buffer-size', type=int, default=2048, help='Rollout buffer size')
     parser.add_argument('--update-epochs', type=int, default=2, help='SGD epochs per rollout')
@@ -46,82 +46,70 @@ def parse_args():
     parser.add_argument('--clip-coef', type=float, default=0.2, help='PPO clipping coefficient')
     parser.add_argument('--vf-coef', type=float, default=0.5, help='Value function loss coefficient')
     parser.add_argument('--ent-coef', type=float, default=0.01, help='Entropy coefficient for exploration')
-    
+
     # ================== Learning Rate Configuration ==================
     parser.add_argument('--lr', type=float, default=3e-4, help='Base learning rate')
-    parser.add_argument('--lr-schedule', type=str, default='linear', 
+    parser.add_argument('--lr-schedule', type=str, default='linear',
                        choices=['constant', 'linear', 'exponential', 'cosine'],
                        help='Learning rate schedule')
-    parser.add_argument('--lr-warmup-steps', type=int, default=200, help='Warmup steps for all schedulers (0 to disable warmup)')
+    parser.add_argument('--lr-warmup-steps', type=int, default=200, help='Warmup steps for all schedulers')
     parser.add_argument('--lr-decay-factor', type=float, default=0.995, help='Learning rate decay factor for exponential schedule')
-    parser.add_argument('--use-kl-adaptive-lr', action='store_true', default=True, help='Enable KL-divergence based adaptive learning rate (default: enabled)')
-    parser.add_argument('--kl-target', type=float, default=0.02, help='Target KL divergence for adaptive LR (default: 0.02)')
-    parser.add_argument('--combine-kl-with-scheduler', action='store_true', default=True, 
-                       help='Combine KL-adaptive LR with scheduler. If False and KL is enabled, only KL-adaptive is used (no scheduler)')
-    
+    parser.add_argument('--use-kl-adaptive-lr', action='store_true', default=True, help='Enable KL-divergence based adaptive learning rate')
+    parser.add_argument('--kl-target', type=float, default=0.02, help='Target KL divergence for adaptive LR')
+    parser.add_argument('--combine-kl-with-scheduler', action='store_true', default=True,
+                       help='Combine KL-adaptive LR with scheduler')
+
     # ================== Exploration and Regularization ==================
     parser.add_argument('--exploration-noise-decay', type=float, default=0.995, help='Exploration noise decay factor')
     parser.add_argument('--min-exploration-noise', type=float, default=0.02, help='Minimum exploration noise')
     parser.add_argument('--value-norm-decay', type=float, default=0.99, help='Value normalization decay factor')
-    
+
     # ================== Training Control ==================
     parser.add_argument('--early-stopping-patience', type=int, default=50, help='Early stopping patience')
     parser.add_argument('--early-stopping-threshold', type=float, default=0.01, help='Early stopping improvement threshold')
     parser.add_argument('--seed', type=int, default=42, help='Random seed')
-    parser.add_argument('--test-seeds', type=int, nargs='+', default=[42, 43, 44], help='Seeds to use for deterministic testing (e.g., --test-seeds 42 43 44)')
-    
+    parser.add_argument('--test-seeds', type=int, nargs='+', default=[42, 43, 44], help='Seeds for deterministic testing')
+
     # ================== Logging and Checkpointing ==================
-    parser.add_argument('--log-dir', type=str, default="host_sort1", help='Log directory for TensorBoard logs, checkpoints, and test data')
+    parser.add_argument('--log-dir', type=str, default="job_ordering_exp1", help='Log directory for TensorBoard and checkpoints')
     parser.add_argument('--log-interval', type=int, default=5, help='Logging interval (updates)')
     parser.add_argument('--test-interval', type=int, default=50, help='Testing interval (updates)')
     parser.add_argument('--save-freq', type=int, default=250, help='Checkpoint save frequency (updates)')
     parser.add_argument('--save-model', type=str, default=None, help='Path to save the trained model')
     parser.add_argument('--resume-from', type=str, default=None, help='Resume training from checkpoint')
-    
+
     # ================== System Configuration ==================
     parser.add_argument('--device', type=str, default='cpu', help='Device to use (auto, cpu, cuda, mps)')
-    
+
     return parser.parse_args()
-
-
-def create_model(obs_dim: int, action_dim: int, num_hosts: int, 
-                 exploration_noise_decay: float = 0.995, 
-                 min_exploration_noise: float = 0.01) -> AttentionSchedulerPolicy:
-    """Create the actor-critic policy with hierarchical attention mechanism."""
-    return AttentionSchedulerPolicy(
-        obs_dim=obs_dim, 
-        action_dim=action_dim, 
-        num_hosts=num_hosts,
-        exploration_noise_decay=exploration_noise_decay,
-        min_exploration_noise=min_exploration_noise
-    )
 
 
 def main() -> None:
     args = parse_args()
-    
+
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
-    
-    # Get project root directory (two levels up from src/training/)
+
+    # Get project root directory
     project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '../..'))
-    
+
     if args.log_dir is None:
         from datetime import datetime
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        log_dir = os.path.join(project_root, "logs", f"ppo_training_{timestamp}")
+        log_dir = os.path.join(project_root, "logs", f"job_ordering_{timestamp}")
     else:
-        # Ensure log_dir is always under project_root/logs/
         log_dir = os.path.join(project_root, "logs", args.log_dir)
-    
+
     # Set up directories
     tensorboard_dir = log_dir
     checkpoint_dir = f"{log_dir}/checkpoints"
-    
-    print("=== LSF Scheduler PPO Training (Advanced) ===")
+
+    print("=== LSF Job Ordering PPO Training ===")
     print(f"Environment config:")
+    print(f"  Environment Type: Job Ordering (bucket prioritization)")
     print(f"  Parallel environments: {args.num_envs}")
     print(f"  Hosts: {args.num_hosts}")
+    print(f"  Max buckets: {args.max_buckets}")
     print(f"  Simulation time: {args.simulation_time} seconds")
     print(f"  Max jobs per step: {args.max_jobs_per_step}")
     print(f"  Host cores: {args.host_cores_min}-{args.host_cores_max}")
@@ -137,10 +125,11 @@ def main() -> None:
     print(f"  Log directory: {log_dir}")
     print(f"  Checkpoints: {checkpoint_dir}")
     print()
-    
-    # Create environment using our updated wrapper
+
+    # Create job ordering environment
     env_kwargs = {
         'num_hosts': args.num_hosts,
+        'max_buckets': args.max_buckets,  # Job ordering specific parameter
         'host_cores_range': (args.host_cores_min, args.host_cores_max),
         'host_memory_range': (args.host_memory_min, args.host_memory_max),
         'job_cores_range': (args.job_cores_min, args.job_cores_max),
@@ -150,30 +139,56 @@ def main() -> None:
         'max_time': args.simulation_time,
         'seed': args.seed,
     }
-    
-    env = make_host_sorting_env(num_envs=args.num_envs, **env_kwargs)
-    
-    print(f"Environment created:")
+
+    env = make_job_ordering_env(num_envs=args.num_envs, **env_kwargs)
+
+    print(f"Job Ordering Environment created:")
     print(f"  Observation space: {env.observation_space}")
     print(f"  Action space: {env.action_space}")
+    print(f"  State format: [bucket_cores, bucket_count] × {args.max_buckets} + [avail_cores, avail_mem]")
     print()
-    
-    # Create policy
-    obs_dim = env.observation_space.shape[0]
-    action_dim = env.action_space.shape[0]
-    
-    policy = create_model(obs_dim, action_dim, args.num_hosts, 
-                         args.exploration_noise_decay, args.min_exploration_noise)
-    
+
+    # Import and create the job ordering specific model
+    # Note: You'll need to create this model file
+    try:
+        from src.training.bucket_ordering_model import BucketOrderingPolicy
+
+        obs_dim = env.observation_space.shape[0]
+        action_dim = env.action_space.shape[0]
+
+        policy = BucketOrderingPolicy(
+            obs_dim=obs_dim,
+            action_dim=action_dim,
+            max_buckets=args.max_buckets,
+            exploration_noise_decay=args.exploration_noise_decay,
+            min_exploration_noise=args.min_exploration_noise
+        )
+
+    except ImportError:
+        print("WARNING: BucketOrderingPolicy not found. Using a simple MLP policy instead.")
+        print("Please create src/training/bucket_ordering_model.py for optimal performance.")
+
+        # Fallback to simple MLP if specialized model doesn't exist yet
+        from src.training.simple_mlp_policy import SimpleMlpPolicy
+        obs_dim = env.observation_space.shape[0]
+        action_dim = env.action_space.shape[0]
+
+        policy = SimpleMlpPolicy(
+            obs_dim=obs_dim,
+            action_dim=action_dim
+        )
+
     print(f"Policy created with {sum(p.numel() for p in policy.parameters()):,} parameters")
     print()
 
-    # Create baseline policy for host sorting
-    baseline_policy = FirstAvailableBaseline(args.num_hosts)
-    print(f"Baseline policy: First-Available (prioritizes host 0, then 1, ...)")
+    # Create baseline policy for job ordering
+    # For now using FirstAvailable with max_buckets, but you can create custom baselines
+    baseline_policy = FirstAvailableBaseline(args.max_buckets)
+    print(f"Baseline policy: First-Available (prioritizes bucket 0, then 1, ...)")
+    print("Note: You can implement custom job ordering baselines for better comparison")
     print()
 
-    # Create trainer with advanced features
+    # Create trainer
     trainer = PPOTrainer(
         policy=policy,
         env=env,
@@ -202,17 +217,17 @@ def main() -> None:
         kl_target=args.kl_target,
         combine_kl_with_scheduler=args.combine_kl_with_scheduler
     )
-    
+
     # Resume from checkpoint if specified
     start_update = 0
     if args.resume_from:
         start_update = trainer.load_checkpoint(args.resume_from)
         print(f"Resumed training from update {start_update}")
-    
+
     # Train
     try:
-        print("Starting advanced PPO training with:")
-        
+        print("Starting Job Ordering PPO training with:")
+
         # Build LR strategy description
         lr_strategy_parts = []
         if args.use_kl_adaptive_lr:
@@ -221,31 +236,31 @@ def main() -> None:
                 lr_strategy_parts.append(f"{args.lr_schedule} scheduler")
         else:
             lr_strategy_parts.append(f"{args.lr_schedule} scheduler")
-        
-        # Add warmup info if applicable
+
         warmup_info = f" with {args.lr_warmup_steps}-step warmup" if args.lr_warmup_steps > 0 else " (no warmup)"
-        
+
+        print(f"- Strategy: Bucket prioritization with heuristic host selection")
         print(f"- LR Strategy: {' + '.join(lr_strategy_parts)}{warmup_info}")
         print(f"- Early stopping patience: {args.early_stopping_patience}")
         print(f"- Value normalization decay: {args.value_norm_decay}")
         print(f"- Exploration noise decay: {args.exploration_noise_decay}")
         print(f"- Checkpoints saved to: {checkpoint_dir}")
         print()
-        
+
         metrics = trainer.train(
             total_timesteps=args.total_timesteps,
             rollout_steps=args.rollout_steps,
             log_interval=args.log_interval,
             test_interval=args.test_interval
         )
-        
+
         print("\nTraining completed successfully!")
-        
+
         # Save model if requested
         if args.save_model:
             torch.save(policy.state_dict(), args.save_model)
             print(f"Model saved to {args.save_model}")
-        
+
         if 'training_metrics' in metrics and 'reward' in metrics['training_metrics']:
             if metrics['training_metrics']['reward']:
                 final_reward = metrics['training_metrics']['reward'][-1]
@@ -253,19 +268,19 @@ def main() -> None:
         elif 'rewards' in metrics and metrics['rewards']:
             final_reward = metrics['rewards'][-1]
             print(f"Final average reward: {final_reward:.3f}")
-        
+
         try:
             env_metrics = env.get_metrics()
             print(f"\nFinal environment metrics:")
-            
+
             metric_names = {
                 'total_jobs_completed': 'Total jobs completed',
-                'completion_rate': 'Completion rate', 
+                'completion_rate': 'Completion rate',
                 'avg_host_core_utilization': 'Average core utilization',
                 'avg_host_memory_utilization': 'Average memory utilization',
                 'avg_waiting_time': 'Average waiting time'
             }
-            
+
             for key, label in metric_names.items():
                 if key in env_metrics:
                     value = env_metrics[key]
@@ -273,18 +288,18 @@ def main() -> None:
                         print(f"  {label}: {value:.3f}")
                     else:
                         print(f"  {label}: {value}")
-                        
+
         except Exception as e:
             print(f"Environment metrics not available: {e}")
-        
+
     except KeyboardInterrupt:
         print("\nTraining interrupted by user")
-        
+
         if args.save_model:
             save_path = args.save_model.replace('.pth', '_interrupted.pth')
             torch.save(policy.state_dict(), save_path)
             print(f"Model saved to {save_path}")
-    
+
     finally:
         env.close()
 

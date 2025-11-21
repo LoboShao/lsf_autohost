@@ -920,20 +920,23 @@ impl ClusterSchedulerEnv {
         self.scheduling_attempts_this_batch = 0;  // Reset attempts counter for new batch
     }
     
-    fn generate_bucket_key(job_id: u32, _cores: u32, _memory: u32) -> String {
+    fn generate_bucket_key(job_id: u32, _cores: u32, _memory: u32, duration: u32) -> String {
         // Flexible function for generating bucket keys
         // Can be easily modified in the future to change grouping strategy
-        // Current strategy: unique key per job (effectively no bucketing)
+        // Current strategy: group by resources and duration
+        let duration_bucket = duration;  // Use exact duration (or duration / 300 for 5-min buckets)
+        format!("c_{}_m_{}_d_{}", _cores, _memory, duration_bucket)
+
         // Alternative strategies:
-        // - Group by resources: format!("c_{}_m_{}", cores, memory)
+        // - Unique per job: format!("job_{}", job_id)
+        // - Group by resources only: format!("c_{}_m_{}", cores, memory)
         // - Group by cores only: format!("c_{}", cores)
         // - Group by memory ranges: format!("m_{}", memory / 1024)
-        format!("job_{}", job_id)
     }
     
     fn add_job_to_bucket(&mut self, job: Job) {
         // Generate key for this job  
-        let key = Self::generate_bucket_key(job.id, job.cores_required, job.memory_required);
+        let key = Self::generate_bucket_key(job.id, job.cores_required, job.memory_required, job.duration);
         
         // Find existing bucket or create new one
         let bucket_idx = self.job_buckets.iter().position(|b| b.bucket_key == key);

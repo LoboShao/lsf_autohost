@@ -101,19 +101,22 @@ class PPOTrainer:
         return result
 
     @torch.inference_mode()
-    def test_baseline_with_metrics(self, num_episodes: int = 1, update_count: int = 0, 
+    def test_baseline_with_metrics(self, num_episodes: int = 1, update_count: int = 0,
                                   test_seeds: List[int] = None) -> Dict:
         """Test baseline policy and collect environment metrics"""
         if test_seeds is None:
             test_seeds = [42]
-            
+
+        # Skip baseline testing if no baseline policy provided
+        if self.baseline_policy is None:
+            return {'average': {}, 'per_seed': {}}
+
         if self.is_vectorized:
             train_env = self.env.envs[0]
         else:
             train_env = self.env
-        
-        num_hosts = train_env.num_hosts
-        baseline = FirstAvailableBaseline(num_hosts)
+
+        baseline = self.baseline_policy
         episode_metrics = []
         seed_to_metrics = {}  # Store per-seed metrics
         
@@ -314,10 +317,12 @@ class PPOTrainer:
         test_seeds: List[int] = None,
         use_kl_adaptive_lr: bool = False,
         kl_target: float = 0.02,
-        combine_kl_with_scheduler: bool = False
+        combine_kl_with_scheduler: bool = False,
+        baseline_policy = None  # Add baseline policy parameter
     ):
         self.policy = policy
         self.env = env
+        self.baseline_policy = baseline_policy  # Store baseline policy
         self.gamma = gamma
         self.lam = lam
         self.test_seeds = test_seeds if test_seeds is not None else [42, 43, 44]
