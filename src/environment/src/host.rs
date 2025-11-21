@@ -109,8 +109,8 @@ impl Host {
         self.core_history.push_back(current_core_util);
         self.memory_history.push_back(current_memory_util);
         
-        // Keep only last 60 values (60 seconds of history)
-        if self.core_history.len() > 60 {
+        // Keep only last 1 values (1 seconds of history)
+        if self.core_history.len() > 1 {
             self.core_history.pop_front();
             self.memory_history.pop_front();
         }

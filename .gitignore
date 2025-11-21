@@ -99,4 +99,8 @@ logs/
 # Scripts folder - unused/legacy code
 scripts/
 
+# Testing scripts and documentation folders
+docs/
+src/testing_scripts/
+
 note
