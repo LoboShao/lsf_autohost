@@ -453,30 +453,24 @@ impl ClusterSchedulerEnv {
     }
     
     fn get_state(&mut self, py: Python) -> PyResult<Py<PyArray1<f32>>> {
-        // Clear the cached state (already pre-allocated with correct size)
         self.cached_state.fill(0.0);
 
-        // Fill state in format: [host1_avail_cores_norm, host1_avail_mem_norm, host2_avail_cores_norm, ...]
-        // Using available resources from PREVIOUS scheduling cycle (LSF-style periodic updates)
+        // State format: [host1_avail_cores_norm, host1_avail_mem_norm, ..., job_features]
+        // Uses resource availability from previous scheduling cycle (LSF-style)
         let max_cores = self.host_cores_range.1 as f32;
         let max_memory = self.host_memory_range.1 as f32;
 
         for i in 0..self.num_hosts {
             let base_idx = i * 2;
 
-            // Get utilization from last scheduling cycle (from history)
             let core_util = self.hosts[i].get_core_utilization();
             let memory_util = self.hosts[i].get_memory_utilization();
 
-            // Convert utilization to available resources
-            // utilization = 1.0 - (available / total)
-            // available = total * (1.0 - utilization)
+            // Convert utilization to available resources: available = total * (1 - utilization)
             let available_cores = self.hosts[i].total_cores as f32 * (1.0 - core_util);
             let available_memory = self.hosts[i].total_memory as f32 * (1.0 - memory_util);
 
-            // Normalized available cores (0 = no cores available, 1 = max possible cores available)
             self.cached_state[base_idx] = available_cores / max_cores;
-            // Normalized available memory (0 = no memory available, 1 = max possible memory available)
             self.cached_state[base_idx + 1] = available_memory / max_memory;
         }
         
