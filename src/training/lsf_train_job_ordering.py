@@ -148,35 +148,13 @@ def main() -> None:
     print(f"  State format: [bucket_cores, bucket_count] × {args.max_buckets} + [avail_cores, avail_mem]")
     print()
 
-    # Import and create the job ordering specific model
-    # Note: You'll need to create this model file
-    try:
-        from src.training.bucket_ordering_model import BucketOrderingPolicy
+    # Use simple MLP policy (input is straightforward: bucket features + global state)
+    from src.training.simple_mlp_policy import SimpleMlpPolicy
 
-        obs_dim = env.observation_space.shape[0]
-        action_dim = env.action_space.shape[0]
+    obs_dim = env.observation_space.shape[0]
+    action_dim = env.action_space.shape[0]
 
-        policy = BucketOrderingPolicy(
-            obs_dim=obs_dim,
-            action_dim=action_dim,
-            max_buckets=args.max_buckets,
-            exploration_noise_decay=args.exploration_noise_decay,
-            min_exploration_noise=args.min_exploration_noise
-        )
-
-    except ImportError:
-        print("WARNING: BucketOrderingPolicy not found. Using a simple MLP policy instead.")
-        print("Please create src/training/bucket_ordering_model.py for optimal performance.")
-
-        # Fallback to simple MLP if specialized model doesn't exist yet
-        from src.training.simple_mlp_policy import SimpleMlpPolicy
-        obs_dim = env.observation_space.shape[0]
-        action_dim = env.action_space.shape[0]
-
-        policy = SimpleMlpPolicy(
-            obs_dim=obs_dim,
-            action_dim=action_dim
-        )
+    policy = SimpleMlpPolicy(obs_dim, action_dim)
 
     print(f"Policy created with {sum(p.numel() for p in policy.parameters()):,} parameters")
     print()

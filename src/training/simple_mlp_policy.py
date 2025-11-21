@@ -11,34 +11,28 @@ class SimpleMlpPolicy(nn.Module):
     Useful as a baseline or fallback when specialized models aren't available.
     """
 
-    def __init__(self, obs_dim, action_dim, hidden_sizes=(256, 256)):
+    def __init__(self, obs_dim, action_dim):
         super().__init__()
         self.obs_dim = obs_dim
         self.action_dim = action_dim
 
-        # Build actor network
-        actor_layers = []
-        prev_size = obs_dim
-        for hidden_size in hidden_sizes:
-            actor_layers.extend([
-                nn.Linear(prev_size, hidden_size),
-                nn.ReLU(),
-            ])
-            prev_size = hidden_size
-        actor_layers.append(nn.Linear(prev_size, action_dim))
-        self.actor = nn.Sequential(*actor_layers)
+        # Actor network: obs -> 512 -> 512 -> action
+        self.actor = nn.Sequential(
+            nn.Linear(obs_dim, 512),
+            nn.ReLU(),
+            nn.Linear(512, 512),
+            nn.ReLU(),
+            nn.Linear(512, action_dim)
+        )
 
-        # Build critic network
-        critic_layers = []
-        prev_size = obs_dim
-        for hidden_size in hidden_sizes:
-            critic_layers.extend([
-                nn.Linear(prev_size, hidden_size),
-                nn.ReLU(),
-            ])
-            prev_size = hidden_size
-        critic_layers.append(nn.Linear(prev_size, 1))
-        self.critic = nn.Sequential(*critic_layers)
+        # Critic network: obs -> 512 -> 512 -> 1
+        self.critic = nn.Sequential(
+            nn.Linear(obs_dim, 512),
+            nn.ReLU(),
+            nn.Linear(512, 512),
+            nn.ReLU(),
+            nn.Linear(512, 1)
+        )
 
         # Log standard deviation (learnable)
         self.log_std = nn.Parameter(torch.zeros(action_dim))
